@@ -91,15 +91,22 @@ Read the logs file (`logs.txt`). It can be large, so focus on:
 
 ### 3c. Hedging analysis
 
+**IMPORTANT: Config-aware analysis.** The status output's "Active Config"
+section shows which assets have `trade: enabled` vs `trade: disabled`. Only
+assets with trading enabled are expected to be hedged. Onchain trades on
+disabled assets will not produce offchain hedges -- this is intentional and
+working as designed. Note disabled-asset activity as INFO, never as WARNING
+or CRITICAL.
+
 Query the downloaded DB for offchain orders:
 
 ```bash
 sqlite3 <db_path> "SELECT view_id, status, payload FROM offchain_order_view ORDER BY rowid DESC LIMIT 30;"
 ```
 
-Check:
-- **Are offchain orders being placed?** If onchain trades are happening but no
-  offchain orders exist, hedging is broken.
+Check (only for **trade-enabled assets**):
+- **Are offchain orders being placed?** If onchain trades are happening on
+  enabled assets but no offchain orders exist, hedging is broken.
 - **Order success rate**: count Filled vs Failed vs Pending. A high failure
   rate indicates a problem.
 - **Failed order patterns**: extract error messages from Failed orders. Common
@@ -109,14 +116,16 @@ Check:
   - Auth/permission errors -- credential issues
   - If the same error repeats many times in a row, flag it prominently.
 - **Hedging gaps**: compare onchain trade timestamps against offchain order
-  timestamps. Every onchain trade should have a corresponding offchain hedge
-  placed shortly after. Large gaps (e.g., many onchain trades over hours with
-  no offchain activity) mean hedging fell behind.
+  timestamps for enabled assets. Every onchain trade on an enabled asset
+  should have a corresponding offchain hedge placed shortly after.
 - **Direction correctness**: onchain buys should produce offchain sells and
   vice versa. Flag any mismatch.
 - **Post-deploy hedging**: if the bot was recently redeployed, check whether
-  hedging resumed immediately. A deploy that doesn't produce offchain orders
-  for existing onchain activity is suspicious.
+  hedging resumed immediately for enabled assets.
+
+For **trade-disabled assets**: if onchain trades are happening, note them as
+informational context ("X trades on disabled asset Y -- unhedged by design").
+Do not flag this as a hedging failure.
 
 Also check event type distribution:
 
@@ -131,8 +140,11 @@ sqlite3 <db_path> "SELECT * FROM position_view;"
 ```
 
 Check:
-- **Net position**: should be near zero if hedging is working. A large absolute
-  net position means delta exposure is building up unhedged.
+- **Net position**: cross-reference with the Active Config. For
+  **trade-enabled assets**, net position should be near zero -- a large
+  absolute value means hedging is failing. For **trade-disabled assets**,
+  non-zero net positions are expected (unhedged by design) -- report them
+  as informational context, not as warnings.
 - **Inventory snapshot freshness**: the status output shows snapshot timestamps.
   If they are stale (more than ~30 minutes old while bot is running), the
   inventory polling loop may have stopped.
@@ -198,10 +210,13 @@ Structure the report as:
    "None" if there's no operational impact, not "probably fine."
 
    Severity categories for reference:
-   - CRITICAL: bot stopped, panics, total hedging failure, crash loops
-   - WARNING: repeated failed orders, hedging gaps, stale snapshots,
-     growing net position
-   - INFO: minor transient errors, expected market-hours gaps
+   - CRITICAL: bot stopped, panics, hedging failure on enabled assets,
+     crash loops
+   - WARNING: repeated failed orders on enabled assets, hedging gaps on
+     enabled assets, stale snapshots, growing net position on enabled
+     assets
+   - INFO: minor transient errors, expected market-hours gaps, unhedged
+     positions on trade-disabled assets (working as designed)
 
 Be direct. If everything is healthy, say so in 3-4 lines. Don't pad. If there
 are problems, lead with the worst ones and be specific about what's wrong and
