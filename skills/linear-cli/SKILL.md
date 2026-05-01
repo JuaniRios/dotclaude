@@ -211,6 +211,11 @@ Some commands have non-obvious required flags. Hit `--help` before running:
 - `--no-pager` is only supported on `linear issue list` — it will error on `project list` and friends.
 - Many commands infer the current issue from the branch name (via the VCS
   integration). If the branch doesn't encode an ID, pass the ID explicitly.
+- `linear issue create` gotchas:
+  - `--priority` takes a **number** (1=urgent, 2=high, 3=medium, 4=low), not a string. `--priority urgent` will error.
+  - `--project` takes the **project name**, not the UUID. Use the name from `linear project list`.
+  - `--label` must match an existing label exactly. Run `linear label list` first to see available labels — don't guess names like "bug" that may not exist.
+  - `--team` is required if no default team is configured. Run `linear team list` to find the key.
 
 ## Config file
 
@@ -270,7 +275,7 @@ implementation, use this workflow:
    linear issue create \
      --title "Fix off-by-one in <foo>" \
      --description-file "$tmp" \
-     --priority high \
+     --priority 2 \
      --label bug
    ```
 
