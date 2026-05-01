@@ -210,9 +210,10 @@ review.
 - No numbered prefixes like `#1`, `**#2 (HIGH)**`, etc. Just say what
   the issue is.
 - No em dashes. Use commas, periods, or "because" instead.
-- No bold severity labels in the comment body. If you want to signal
-  severity, say something like "this should be fixed before merge" or
-  "nit:" or "minor:".
+- **Start each comment with a lowercase severity prefix** that signals
+  how important the finding is: `critical:`, `should fix:`, `minor:`,
+  or `nit:`. This replaces bold labels and numbered prefixes. The
+  prefix is short and natural, like a colleague would write.
 - No bullet-point lists inside a single comment unless genuinely needed.
   Prefer short paragraphs.
 - Keep each comment to 2-4 sentences. Say what's wrong, why it matters,
@@ -268,10 +269,18 @@ arbitrary line in the file.** To find the right line number:
   changed line in the same file, or fall back to creating a top-level
   review comment instead of an inline one
 
-**Step 3 — Handle findings without diff lines.** If a finding references
-code that isn't in the diff (e.g., a missing test, a documentation issue),
-include it in the review `body` (top-level comment) rather than as an
-inline comment.
+**Step 3 — Handle findings without diff lines.** Strongly prefer inline
+comments over top-level body text. If a finding references unchanged
+code, look for a **related** changed line in the diff where the comment
+makes sense contextually. For example, if a finding is about an
+interaction between existing code and newly introduced code (e.g., "the
+existing reconciler doesn't account for the new compaction policy"),
+place the comment on the new code that introduces the interaction, not
+on the untouched code. Only fall back to the review `body` when the
+finding has genuinely no related changed code anywhere in the diff
+(e.g., a missing file, a documentation gap, a broad architectural
+concern). The goal is to minimize the top-level body so the review
+reads as targeted inline feedback, not a wall of text.
 
 ## Hard rules
 
@@ -290,7 +299,13 @@ inline comment.
 7. **Posted reviews must read like a human wrote them.** No AI references
    (models, agents, "cross-review", Claude, Codex, Gemini). No numbered
    finding prefixes (`#1`, `**#2 (HIGH)**`). No em dashes. No bold
-   severity labels. No fancy formatting. Write short, direct comments
-   like a colleague would. The `raw-*.md` and `review.md` on disk can
-   use structured formatting (they're local), but anything posted to
-   GitHub must be conversational and concise.
+   severity labels. Use lowercase severity prefixes (`critical:`,
+   `should fix:`, `minor:`, `nit:`) to signal importance. Write short,
+   direct comments like a colleague would. The `raw-*.md` and
+   `review.md` on disk can use structured formatting (they're local),
+   but anything posted to GitHub must be conversational and concise.
+8. **Maximize inline comments, minimize top-level body.** The review
+   `body` should be a 2-3 sentence overall assessment only. Every
+   finding should be an inline comment on a diff line. When a finding
+   references unchanged code, place the comment on the nearest related
+   changed line instead of putting it in the body.
