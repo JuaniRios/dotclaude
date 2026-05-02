@@ -32,6 +32,7 @@ Parse `$ARGUMENTS` to determine the subcommand:
 | `load <id>`                              | load          |
 | `update <id> <note text...>`            | quick-update  |
 | `update <id>`                            | full-update   |
+| `update`                                 | auto-update   |
 | `list`                                   | list          |
 | `status [id]`                            | status        |
 | `close <id>`                             | close         |
@@ -242,6 +243,37 @@ are ready to continue the investigation. Reference the key open items from the
 Actions section.
 
 ## Step 3 — `update`: Add to a trace
+
+### 3z. Auto-detect trace from conversation (no ID provided)
+
+When `/trace update` is called with no ID and no note text, try to
+auto-detect which trace is active in the current conversation before
+falling back to asking:
+
+1. **Scan the conversation** for signs of a loaded trace:
+   - The `━━━ Trace loaded: <slug> ━━━` banner from a prior `/trace load`
+   - TRACE.md frontmatter content (look for `slug:`, `linear:`, `status:`)
+   - References to a specific trace ID (e.g., "RAI-280", "trace RAI-280")
+
+2. **If a trace is found** — proceed to auto-update mode:
+   - Read the current TRACE.md file
+   - Review the conversation since the trace was loaded (or since the last
+     `/trace update`)
+   - Auto-extract relevant new context into the appropriate sections:
+     - **Timeline**: significant events, milestones, deployments, PRs opened
+     - **Findings**: new technical discoveries, root cause insights, safety
+       analyses, design decisions
+     - **Actions**: new action items identified, existing actions completed
+     - **Notes**: add a timestamped note summarizing the session's work
+     - **PRs**: link any new PRs mentioned in the conversation
+   - Skip information that is already captured in the trace (compare with
+     existing content to avoid duplication)
+   - Apply all edits to the TRACE.md file
+   - Sync to Linear (Step 3c)
+   - Print a summary of what was added
+
+3. **If no trace is found** — fall back to interactive mode (Step 3b): ask
+   the user which trace to update and what to change.
 
 ### 3a. Quick update (note text provided in args)
 
