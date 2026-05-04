@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(*), Read, Grep, Glob, Agent
-description: Generate a daily summary of all work done across repos and Claude Code sessions. Shows what was accomplished, what's next, open points, and stats.
+description: Generate a team-facing daily summary of all work done across repos. For pasting in the group chat. Shows what was accomplished, what's next, open points, and stats.
 ---
 
 # Daily Report — end-of-day work summary
@@ -213,15 +213,16 @@ themes rather than listing every commit or prompt.
 # Daily Report — {today's date}
 
 ## Summary
-2-3 sentences describing the day's overall focus and accomplishments.
-Include temporal markers if work spanned morning/afternoon/evening.
+2-3 sentences in first person describing the day's overall focus and
+accomplishments. Include temporal markers if work spanned morning/afternoon/evening.
 
 ## What Was Done
 Group by theme (e.g., "Feature Development", "Bug Fixes", "Infrastructure",
 "Research/Investigation"). Each theme gets:
 - **Theme name**
-  - 2-4 bullet points of what was accomplished
+  - 2-4 bullet points of what was accomplished, written in first person
   - Include repo names in brackets: [st0x.liquidity]
+  - Include Linear issue IDs where applicable (e.g., RAI-280)
   - Link to PRs where applicable
 
 Only create a theme if the work exceeded ~10 minutes. Small tasks go under
@@ -241,10 +242,9 @@ Infer upcoming work from:
 - Any issues mentioned in sessions that weren't resolved
 
 ## Stats
-- Sessions: {count} across {n} repos
 - Commits: {count}
 - PRs opened: {count} | merged: {count} | reviewed: {count}
-- Issues closed: {count}
+- Linear issues: completed: {count} | started: {count} | created: {count}
 ```
 
 ## Step 4 — Output
@@ -265,6 +265,12 @@ file unless the user asks.
 6. Include worktree activity — the user works across multiple worktrees of
    the same repo.
 7. Keep the report concise: aim for one screen (40-60 lines of markdown).
+8. Write the entire report in first person ("I fixed...", "I investigated...")
+   — this is pasted directly into a team group chat.
+9. Never mention Claude Code sessions, JSONL files, AI tooling, or internal
+   data sources in the output. Session data is an input source for
+   understanding what was done, not something the team needs to see.
+10. Always include Linear issue IDs (e.g., RAI-280) when referencing tickets.
 
 ## Failure modes
 
