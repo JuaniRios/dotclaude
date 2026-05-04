@@ -339,12 +339,19 @@ file unless the user asks.
 7. Keep the report concise: aim for one screen (40-60 lines of markdown).
 8. Write the entire report in first person ("I fixed...", "I investigated...")
    — this is pasted directly into a team group chat.
-9. Never mention Claude Code sessions, JSONL files, AI tooling, or internal
-   data sources in the output. Session data is an input source for
-   understanding what was done, not something the team needs to see.
+9. Never mention internal tooling or process in the output. This includes:
+   Claude Code sessions, JSONL files, AI tooling, traces, cross-reviews,
+   feedback-reviews, review loops, slash commands, skills, sub-agents, or
+   any other implementation detail of how the work was done. These are
+   input sources for understanding what was accomplished — the team only
+   cares about outcomes, not process. Write about *what* was done and *why*,
+   never *how* (e.g., "addressed PR review comments" not "ran
+   /feedback-review"; "investigated and root-caused the bug" not "updated
+   trace RAI-280"; "reviewed the fix" not "ran cross-review with 3 agents").
 10. Always include Linear issue IDs (e.g., RAI-280) when referencing tickets.
-11. If traces were updated today, mention the investigation context in the
-    relevant theme (e.g., "Continued investigation RAI-280: ...").
+11. If investigation traces were updated today, weave the investigation
+    findings into the relevant theme naturally (e.g., "Root-caused the
+    Fireblocks timeout — ..."). Never use the word "trace" in the output.
 
 ## Failure modes
 
