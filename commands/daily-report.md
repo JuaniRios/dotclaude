@@ -95,11 +95,16 @@ opening request and final state. Extract:
 
 ### Agent B — Git activity across all repos
 
-For every git repo under `~/Github/` (including worktrees), collect today's
-commits by the current user:
+**IMPORTANT**: This project uses Graphite (`gt`) which frequently amends and
+rebases commits. `git log --since=today` uses the *author date* which does NOT
+change on rebase/amend, so it misses work done today on branches created
+earlier. Use TWO approaches to catch everything:
+
+1. **Reflog-based detection** — `git reflog` records when branch tips move,
+   regardless of commit dates. This catches rebases, amends, and force-pushes.
+2. **Standard git log** — as a fallback for new commits authored today.
 
 ```bash
-git_user=$(git config user.name 2>/dev/null || echo "")
 git_email=$(git config user.email 2>/dev/null || echo "")
 today=$(date +%Y-%m-%d)
 
@@ -108,19 +113,38 @@ for repo in ~/Github/*/; do
   if [[ "$repo" == *-worktrees* ]]; then continue; fi
   if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then continue; fi
 
-  commits=$(git -C "$repo" log --since="$today 00:00" --author="$git_email" \
+  repo_name=$(basename "$repo")
+
+  # Approach 1: Reflog — find branches updated today (catches amends/rebases)
+  # Shows which branches had their tip moved today
+  updated_branches=$(git -C "$repo" reflog --since="$today 00:00" \
+    --pretty=format:"%D" --all 2>/dev/null | grep -oE 'refs/heads/[^ ,]+' | \
+    sed 's|refs/heads/||' | sort -u)
+
+  # Approach 2: Standard git log for commits authored today
+  authored_today=$(git -C "$repo" log --since="$today 00:00" --author="$git_email" \
     --pretty=format:"%h|%s|%ai" --all 2>/dev/null)
 
-  if [ -n "$commits" ]; then
-    repo_name=$(basename "$repo")
+  if [ -n "$updated_branches" ] || [ -n "$authored_today" ]; then
     echo "### $repo_name"
-    echo "$commits" | while IFS='|' read -r hash subject date; do
-      echo "  - [$hash] $subject"
-    done
-    # Also show files changed
-    git -C "$repo" diff --stat $(git -C "$repo" log --since="$today 00:00" \
-      --author="$git_email" --format="%H" --all 2>/dev/null | tail -1)^..HEAD 2>/dev/null \
-      | tail -1
+
+    if [ -n "$updated_branches" ]; then
+      echo "  Branches pushed/amended today:"
+      echo "$updated_branches" | while read -r branch; do
+        # Show the branch tip commit
+        tip=$(git -C "$repo" log -1 --pretty=format:"%h|%s" "$branch" 2>/dev/null)
+        if [ -n "$tip" ]; then
+          echo "    - $branch: $tip"
+        fi
+      done
+    fi
+
+    if [ -n "$authored_today" ]; then
+      echo "  Commits authored today:"
+      echo "$authored_today" | while IFS='|' read -r hash subject date; do
+        echo "    - [$hash] $subject"
+      done
+    fi
     echo ""
   fi
 done
@@ -131,18 +155,71 @@ Also check worktree directories:
 ```bash
 for wt_dir in ~/Github/*-worktrees/*/; do
   if [ ! -d "$wt_dir/.git" ] && [ ! -f "$wt_dir/.git" ]; then continue; fi
-  commits=$(git -C "$wt_dir" log --since="$today 00:00" --author="$git_email" \
+
+  wt_name=$(basename "$(dirname "$wt_dir")")/$(basename "$wt_dir")
+
+  updated_branches=$(git -C "$wt_dir" reflog --since="$today 00:00" \
+    --pretty=format:"%D" --all 2>/dev/null | grep -oE 'refs/heads/[^ ,]+' | \
+    sed 's|refs/heads/||' | sort -u)
+
+  authored_today=$(git -C "$wt_dir" log --since="$today 00:00" --author="$git_email" \
     --pretty=format:"%h|%s|%ai" --all 2>/dev/null)
-  if [ -n "$commits" ]; then
-    wt_name=$(basename "$(dirname "$wt_dir")")/$(basename "$wt_dir")
+
+  if [ -n "$updated_branches" ] || [ -n "$authored_today" ]; then
     echo "### $wt_name (worktree)"
-    echo "$commits" | while IFS='|' read -r hash subject date; do
-      echo "  - [$hash] $subject"
-    done
+    if [ -n "$updated_branches" ]; then
+      echo "  Branches pushed/amended today:"
+      echo "$updated_branches" | while read -r branch; do
+        tip=$(git -C "$wt_dir" log -1 --pretty=format:"%h|%s" "$branch" 2>/dev/null)
+        if [ -n "$tip" ]; then
+          echo "    - $branch: $tip"
+        fi
+      done
+    fi
+    if [ -n "$authored_today" ]; then
+      echo "  Commits authored today:"
+      echo "$authored_today" | while IFS='|' read -r hash subject date; do
+        echo "    - [$hash] $subject"
+      done
+    fi
     echo ""
   fi
 done
 ```
+
+### Agent B2 — Trace files (run inside Agent B, not a separate agent)
+
+Check for investigation traces updated today. Traces live at
+`~/Github/traces/*/TRACE.md`. Include this in the git agent's work:
+
+```bash
+today=$(date +%Y-%m-%d)
+
+echo "=== Traces updated today ==="
+for trace_dir in ~/Github/traces/*/; do
+  trace_file="$trace_dir/TRACE.md"
+  if [ ! -f "$trace_file" ]; then continue; fi
+
+  # Check if the trace file was modified today (via filesystem mtime)
+  mod_date=$(stat -f "%Sm" -t "%Y-%m-%d" "$trace_file" 2>/dev/null)
+  if [ "$mod_date" = "$today" ]; then
+    slug=$(basename "$trace_dir")
+    # Extract status from frontmatter
+    status=$(grep -m1 '^status:' "$trace_file" | awk '{print $2}')
+    linear=$(grep -m1 '^linear:' "$trace_file" | awk '{print $2}')
+    echo "### $slug"
+    echo "  Status: $status"
+    echo "  Linear: $linear"
+    # Show last 5 timeline entries for context
+    grep -A0 '^\- \*\*' "$trace_file" | tail -5
+    echo ""
+  fi
+done
+```
+
+This reveals which investigations were actively worked on today and their
+current status (active/resolved). Include trace context in the report's
+thematic grouping — traces represent multi-day investigations.
 
 ### Agent C — Linear activity
 
@@ -188,11 +265,6 @@ gh search prs --author="$gh_user" --created=">=$today" --json title,url,reposito
 echo ""
 echo "### PRs merged today"
 gh search prs --author="$gh_user" --merged=">=$today" --json title,url,repository \
-  --jq '.[] | "- [\(.repository.nameWithOwner)] \(.title) — \(.url)"' 2>/dev/null
-
-echo ""
-echo "### PRs reviewed today"
-gh search prs --reviewed-by="$gh_user" --updated=">=$today" --json title,url,repository \
   --jq '.[] | "- [\(.repository.nameWithOwner)] \(.title) — \(.url)"' 2>/dev/null
 
 echo ""
@@ -242,8 +314,8 @@ Infer upcoming work from:
 - Any issues mentioned in sessions that weren't resolved
 
 ## Stats
-- Commits: {count}
-- PRs opened: {count} | merged: {count} | reviewed: {count}
+- Pushed to: [repo] PR #X, [repo] PR #Y, ... (list each project/PR that got commits)
+- PRs opened: {count} | merged: {count}
 - Linear issues: completed: {count} | started: {count} | created: {count}
 ```
 
@@ -271,6 +343,8 @@ file unless the user asks.
    data sources in the output. Session data is an input source for
    understanding what was done, not something the team needs to see.
 10. Always include Linear issue IDs (e.g., RAI-280) when referencing tickets.
+11. If traces were updated today, mention the investigation context in the
+    relevant theme (e.g., "Continued investigation RAI-280: ...").
 
 ## Failure modes
 
