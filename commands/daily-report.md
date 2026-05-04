@@ -281,49 +281,109 @@ themes rather than listing every commit or prompt.
 
 ### Report format
 
-```markdown
-# Daily Report — {today's date}
+Use Telegram HTML formatting. `<b>` for headers and theme names,
+`<code>` for repo names and issue IDs, plain `-` for bullets. No links —
+write PR references as plain text (e.g., PR #143). Blank lines separate
+sections. Every section header and theme name MUST start with an emoji.
 
-## Summary
-2-3 sentences in first person describing the day's overall focus and
-accomplishments. Include temporal markers if work spanned morning/afternoon/evening.
+Emoji conventions:
+- 📋 Title
+- ✅ What Was Done
+- 🔧 Bug fix / reliability theme
+- 🏗 Architecture / infrastructure theme
+- 🚀 Feature development theme
+- 📦 Other / miscellaneous theme
+- 📌 What's Next
+- ⚠️ Open Points / Blockers
+- 📊 Stats
 
-## What Was Done
-Group by theme (e.g., "Feature Development", "Bug Fixes", "Infrastructure",
-"Research/Investigation"). Each theme gets:
-- **Theme name**
-  - 2-4 bullet points of what was accomplished, written in first person
-  - Include repo names in brackets: [st0x.liquidity]
-  - Include Linear issue IDs where applicable (e.g., RAI-280)
-  - Link to PRs where applicable
+Pick the most fitting emoji per theme from the list above (or use another
+relevant one if none fits). The key rule: every `<b>` header gets an emoji
+prefix.
+
+Example:
+
+```
+📋 <b>Daily Report — {today's date}</b>
+
+{2-3 sentences in first person.}
+
+✅ <b>What Was Done</b>
+
+🔧 <b>{Theme Name}</b> — <code>{repo}</code>
+- 2-4 bullet points of what was accomplished, written in first person
+- Include repo names in code tags: <code>st0x.liquidity</code>
+- Include Linear issue IDs: <code>RAI-280</code>
+- Reference PRs as plain text: PR #143
 
 Only create a theme if the work exceeded ~10 minutes. Small tasks go under
-"Other".
+"📦 Other".
 
-## What's Next
-Infer upcoming work from:
+📌 <b>What's Next</b>
 - Open PRs awaiting review
 - In-progress sessions that weren't completed
-- Branches with uncommitted changes
 - TODO items or follow-ups mentioned in session conversations
 
-## Open Points / Blockers
+⚠️ <b>Open Points / Blockers</b>
 - Failing CI on any branches
 - PRs with requested changes
-- Stale reviews
 - Any issues mentioned in sessions that weren't resolved
 
-## Stats
-- Pushed to: [repo] PR #X, [repo] PR #Y, ... (list each project/PR that got commits)
+📊 <b>Stats</b>
+- Pushed to: <code>repo</code> PR #X, <code>repo</code> PR #Y, ...
 - PRs opened: {count} | merged: {count}
 - Linear issues: completed: {count} | started: {count} | created: {count}
 ```
 
-## Step 4 — Output
+## Step 4 — Send via Telegram
 
-Wrap the entire report in a single fenced code block (` ```markdown ... ``` `)
-so the user can copy-paste the raw markdown directly into a group chat.
-Do NOT save it to a file unless the user asks.
+Send the report to the user's Telegram "Saved Messages" via the bot API.
+Credentials are in `~/.config/telegram-bot.env` (must contain
+`export TELEGRAM_BOT_TOKEN=...` and `export TELEGRAM_CHAT_ID=...`).
+
+1. Write the report text to `/tmp/daily-report.txt` using Telegram HTML
+   formatting (see formatting rules below).
+2. Send it:
+
+```bash
+source ~/.config/telegram-bot.env
+python3 -c "
+import os, urllib.request, urllib.parse, json
+
+with open('/tmp/daily-report.txt') as f:
+    text = f.read()
+
+token = os.environ['TELEGRAM_BOT_TOKEN']
+chat_id = os.environ['TELEGRAM_CHAT_ID']
+url = f'https://api.telegram.org/bot{token}/sendMessage'
+data = urllib.parse.urlencode({
+    'chat_id': chat_id,
+    'text': text,
+    'parse_mode': 'HTML'
+}).encode()
+req = urllib.request.Request(url, data)
+resp = json.load(urllib.request.urlopen(req))
+if resp.get('ok'):
+    print('Sent to Telegram')
+else:
+    print(f'Telegram error: {resp}')
+"
+```
+
+3. Print a brief confirmation ("Report sent to Telegram Saved Messages.")
+   and also print the report inline so the user can review it in the
+   terminal.
+
+### Telegram HTML formatting rules
+
+Use Telegram's HTML parse mode — it's more reliable than MarkdownV2:
+- `<b>text</b>` for section headers and theme names
+- `<code>text</code>` for repo names, issue IDs (e.g., `<code>RAI-280</code>`)
+- Plain `-` for bullets
+- No links — write PR references as plain text (e.g., PR #143)
+- No special escaping needed (except `<`, `>`, `&` which are rare in reports)
+
+Do NOT save the report to a permanent file unless the user asks.
 
 ## Hard rules
 
@@ -353,6 +413,9 @@ Do NOT save it to a file unless the user asks.
 11. If investigation traces were updated today, weave the investigation
     findings into the relevant theme naturally (e.g., "Root-caused the
     Fireblocks timeout — ..."). Never use the word "trace" in the output.
+12. The report is sent via Telegram bot using HTML parse mode. Use
+    `<b>` for headers and theme names, `<code>` for repo names and IDs,
+    plain `-` for bullets, and no links (plain "PR #123" text).
 
 ## Failure modes
 
