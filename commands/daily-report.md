@@ -1,12 +1,45 @@
 ---
 allowed-tools: Bash(*), Read, Grep, Glob, Agent
 description: Generate a team-facing daily summary of all work done across repos. For pasting in the group chat. Shows what was accomplished, what's next, open points, and stats.
+argument-hint: "[compressed]"
 ---
 
 # Daily Report — end-of-day work summary
 
 Generates a comprehensive daily report by aggregating Claude Code sessions,
 git history, and GitHub activity across all repos in `~/Github/`.
+
+## Compressed mode
+
+When invoked as `/daily-report compressed`, produce a much shorter report.
+Still run all the same data collection (Steps 1–2), but in Step 3 compress
+the output to ~10-15 lines max:
+
+- No Stats section
+- No Open Points / Blockers section (unless critical)
+- "What Was Done" becomes 3-5 one-line bullets (one per theme, no sub-bullets)
+- "What's Next" becomes 2-3 one-line bullets
+- No theme sub-headings — just a flat list
+
+Compressed format example:
+
+```
+📋 <b>Daily Report — {date}</b>
+
+✅ <b>Done</b>
+- [st0x.issuance] Built unified redemption recovery endpoint, PR #143 in review (RAI-281)
+- [st0x.liquidity] Fixed silent WebSocket stream failure in OrderFillMonitor, PR #631
+- [st0x.liquidity] Addressed PR feedback on #629, #616, #628; created RAI-291 for event-sorcery extraction
+- Completed RAI-272 (nix secret rekeying fix)
+
+📌 <b>Next</b>
+- Merge all open PRs, recover stuck issuance funds, deploy stream fix
+- Unblock staging, test hedging, deploy to prod if green
+- Review 14 PRs awaiting my review
+```
+
+Then send via Telegram (Step 4) as normal. If the argument is NOT
+"compressed", continue with the full report flow below.
 
 ## Step 1 — Determine date range
 
