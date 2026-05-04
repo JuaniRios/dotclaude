@@ -321,8 +321,9 @@ Infer upcoming work from:
 
 ## Step 4 — Output
 
-Print the full report directly to the user as markdown. Do NOT save it to a
-file unless the user asks.
+Wrap the entire report in a single fenced code block (` ```markdown ... ``` `)
+so the user can copy-paste the raw markdown directly into a group chat.
+Do NOT save it to a file unless the user asks.
 
 ## Hard rules
 
