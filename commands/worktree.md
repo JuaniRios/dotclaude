@@ -250,12 +250,26 @@ To remove later:
   /worktree remove <name>
 ```
 
-## Step 7 — Detach all worktrees
+## Step 7 — Detach all worktrees at trunk
 
 When `$ARGUMENTS` is `detach-all`:
 
-1. List all worktrees and find ones that are on a branch (not already
-   detached):
+1. Fetch the latest from the remote:
+
+   ```bash
+   git fetch origin
+   ```
+
+2. Determine the trunk branch name (`main` or `master`):
+
+   ```bash
+   git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null
+   ```
+
+   If that fails, check which of `origin/main` or `origin/master` exists.
+   Store the result as `trunk_ref` (e.g., `origin/main`).
+
+3. List all worktrees:
 
    ```bash
    git worktree list --porcelain
@@ -263,30 +277,35 @@ When `$ARGUMENTS` is `detach-all`:
 
    Parse the output: each worktree block has `worktree <path>`, `HEAD <sha>`,
    and either `branch refs/heads/<name>` or `detached`. Skip the main repo
-   worktree (the bare repo root). Skip any already detached.
+   worktree (the bare repo root).
 
-2. For each worktree on a branch, detach it by checking out its current
-   HEAD as detached:
+4. For each worktree (whether on a branch or already detached at an old
+   commit), reset it to the latest trunk and detach:
 
    ```bash
-   git -C "<wt_path>" checkout --detach HEAD
+   git -C "<wt_path>" checkout --detach "$trunk_ref"
    ```
 
-3. Print a summary:
+   A worktree is **already up to date** only if it is detached AND its HEAD
+   already matches the resolved sha of `$trunk_ref`. Skip those.
+
+5. Print a summary:
 
    ```
-   Detached <count> worktree(s):
-     <name>: <branch> -> detached at <short sha>
+   Detached <count> worktree(s) at <trunk_ref> (<short sha>):
+     <name>: <previous state> -> detached at <short sha>
      ...
 
-   Already detached: <count>
+   Already up to date: <count>
    Skipped (main repo): <main path>
    ```
 
-   If no worktrees needed detaching, print:
+   `<previous state>` is either the branch name or `detached at <old short sha>`.
+
+   If no worktrees needed updating, print:
 
    ```
-   All worktrees are already detached.
+   All worktrees are already detached at <trunk_ref>.
    ```
 
 ## Hard rules
