@@ -346,8 +346,10 @@ section header and theme name MUST start with an emoji.
 **Hyperlinks** — make references clickable using `<a href="...">`:
 - Linear issues: `<a href="https://linear.app/makeitrain/issue/RAI-280">RAI-280</a>`
 - Repo names: `<a href="https://github.com/ST0x-Technology/st0x.liquidity">st0x.liquidity</a>`
-- For repos, derive the GitHub URL from the git remote of each repo in
-  `~/Github/`. The org is typically `ST0x-Technology` or `rainlanguage`.
+- PR references: `<a href="https://app.graphite.dev/github/pr/ST0x-Technology/st0x.liquidity/633">PR #633</a>`
+  The Graphite URL pattern is: `https://app.graphite.dev/github/pr/<org>/<repo>/<number>`
+- For repos, derive the GitHub org/repo from the git remote of each repo
+  in `~/Github/`. The org is typically `ST0x-Technology` or `rainlanguage`.
 
 Emoji conventions:
 - 📋 Title
@@ -377,7 +379,7 @@ Example:
 - 2-4 bullet points of what was accomplished, written in first person
 - Link repo names: <a href="https://github.com/ST0x-Technology/st0x.liquidity">st0x.liquidity</a>
 - Link Linear issue IDs: <a href="https://linear.app/makeitrain/issue/RAI-280">RAI-280</a>
-- Reference PRs as plain text: PR #143
+- Link PRs to Graphite: <a href="https://app.graphite.dev/github/pr/ST0x-Technology/st0x.liquidity/143">PR #143</a>
 
 Only create a theme if the work exceeded ~10 minutes. Small tasks go under
 "📦 Other".
@@ -393,7 +395,7 @@ Only create a theme if the work exceeded ~10 minutes. Small tasks go under
 - Any issues mentioned in sessions that weren't resolved
 
 📊 <b>Stats</b>
-- Merged: <a href="...">repo</a> PR #X, <a href="...">repo</a> PR #Y, ...
+- Merged: <a href="...">repo</a> <a href="...">PR #X</a>, <a href="...">repo</a> <a href="...">PR #Y</a>, ...
 - PRs opened: {count} | merged: {count}
 - Linear issues: completed: {count} | started: {count} | created: {count}
 ```
@@ -447,7 +449,7 @@ Use Telegram's HTML parse mode — it's more reliable than MarkdownV2:
 - `<code>text</code>` only for inline code (function names, endpoints,
   error messages) — NOT for repo names or issue IDs
 - Plain `-` for bullets
-- Reference PRs as plain text (e.g., PR #143)
+- Link PRs to Graphite: `<a href="https://app.graphite.dev/github/pr/<org>/<repo>/<number>">PR #N</a>`
 - No special escaping needed (except `<`, `>`, `&` which are rare in reports)
 
 Do NOT save the report to a permanent file unless the user asks.
@@ -481,9 +483,9 @@ Do NOT save the report to a permanent file unless the user asks.
     findings into the relevant theme naturally (e.g., "Root-caused the
     Fireblocks timeout — ..."). Never use the word "trace" in the output.
 12. The report is sent via Telegram bot using HTML parse mode. Use
-    `<b>` for headers and theme names, `<a href>` links for Linear issues
-    and repo names, `<code>` only for inline code, plain `-` for bullets,
-    and plain "PR #123" text for PR references.
+    `<b>` for headers and theme names, `<a href>` links for Linear issues,
+    repo names, and PR numbers (linking to Graphite), `<code>` only for
+    inline code, and plain `-` for bullets.
 
 ## Failure modes
 
