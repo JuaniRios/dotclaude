@@ -238,11 +238,11 @@ for trace_dir in ~/Github/traces/*/; do
   if [ "$mod_date" = "$today" ]; then
     slug=$(basename "$trace_dir")
     # Extract status from frontmatter
-    status=$(grep -m1 '^status:' "$trace_file" | awk '{print $2}')
-    linear=$(grep -m1 '^linear:' "$trace_file" | awk '{print $2}')
+    trace_status=$(grep -m1 '^status:' "$trace_file" | awk '{print $2}')
+    trace_linear=$(grep -m1 '^linear:' "$trace_file" | awk '{print $2}')
     echo "### $slug"
-    echo "  Status: $status"
-    echo "  Linear: $linear"
+    echo "  Status: $trace_status"
+    echo "  Linear: $trace_linear"
     # Show last 5 timeline entries for context
     grep -A0 '^\- \*\*' "$trace_file" | tail -5
     echo ""
@@ -310,8 +310,8 @@ for repo in ~/Github/*/; do
   # Get the GitHub remote (owner/repo)
   remote_url=$(git -C "$repo" remote get-url origin 2>/dev/null)
   if [ -z "$remote_url" ]; then continue; fi
-  # Extract owner/repo from SSH or HTTPS URL
-  nwo=$(echo "$remote_url" | sed -E 's|.*[:/]([^/]+/[^/]+?)(\.git)?$|\1|')
+  # Extract owner/repo from SSH or HTTPS URL (BSD sed compatible)
+  nwo=$(echo "$remote_url" | sed 's|\.git$||' | sed 's|.*[:/]\([^/]*/[^/]*\)$|\1|')
   if [ -z "$nwo" ]; then continue; fi
 
   # Query merged PRs authored by user, sorted by most recent
@@ -339,9 +339,15 @@ themes rather than listing every commit or prompt.
 ### Report format
 
 Use Telegram HTML formatting. `<b>` for headers and theme names,
-`<code>` for repo names and issue IDs, plain `-` for bullets. No links —
-write PR references as plain text (e.g., PR #143). Blank lines separate
-sections. Every section header and theme name MUST start with an emoji.
+plain `-` for bullets, `<code>` only for inline code snippets (function
+names, endpoints, error messages). Blank lines separate sections. Every
+section header and theme name MUST start with an emoji.
+
+**Hyperlinks** — make references clickable using `<a href="...">`:
+- Linear issues: `<a href="https://linear.app/makeitrain/issue/RAI-280">RAI-280</a>`
+- Repo names: `<a href="https://github.com/ST0x-Technology/st0x.liquidity">st0x.liquidity</a>`
+- For repos, derive the GitHub URL from the git remote of each repo in
+  `~/Github/`. The org is typically `ST0x-Technology` or `rainlanguage`.
 
 Emoji conventions:
 - 📋 Title
@@ -367,10 +373,10 @@ Example:
 
 ✅ <b>What Was Done</b>
 
-🔧 <b>{Theme Name}</b> — <code>{repo}</code>
+🔧 <b>{Theme Name}</b> — <a href="https://github.com/ST0x-Technology/st0x.liquidity">st0x.liquidity</a>
 - 2-4 bullet points of what was accomplished, written in first person
-- Include repo names in code tags: <code>st0x.liquidity</code>
-- Include Linear issue IDs: <code>RAI-280</code>
+- Link repo names: <a href="https://github.com/ST0x-Technology/st0x.liquidity">st0x.liquidity</a>
+- Link Linear issue IDs: <a href="https://linear.app/makeitrain/issue/RAI-280">RAI-280</a>
 - Reference PRs as plain text: PR #143
 
 Only create a theme if the work exceeded ~10 minutes. Small tasks go under
@@ -387,7 +393,7 @@ Only create a theme if the work exceeded ~10 minutes. Small tasks go under
 - Any issues mentioned in sessions that weren't resolved
 
 📊 <b>Stats</b>
-- Pushed to: <code>repo</code> PR #X, <code>repo</code> PR #Y, ...
+- Merged: <a href="...">repo</a> PR #X, <a href="...">repo</a> PR #Y, ...
 - PRs opened: {count} | merged: {count}
 - Linear issues: completed: {count} | started: {count} | created: {count}
 ```
@@ -416,7 +422,8 @@ url = f'https://api.telegram.org/bot{token}/sendMessage'
 data = urllib.parse.urlencode({
     'chat_id': chat_id,
     'text': text,
-    'parse_mode': 'HTML'
+    'parse_mode': 'HTML',
+    'disable_web_page_preview': 'true'
 }).encode()
 req = urllib.request.Request(url, data)
 resp = json.load(urllib.request.urlopen(req))
@@ -435,9 +442,12 @@ else:
 
 Use Telegram's HTML parse mode — it's more reliable than MarkdownV2:
 - `<b>text</b>` for section headers and theme names
-- `<code>text</code>` for repo names, issue IDs (e.g., `<code>RAI-280</code>`)
+- `<a href="...">text</a>` for Linear issues and repo names (see
+  Hyperlinks section in Report format above)
+- `<code>text</code>` only for inline code (function names, endpoints,
+  error messages) — NOT for repo names or issue IDs
 - Plain `-` for bullets
-- No links — write PR references as plain text (e.g., PR #143)
+- Reference PRs as plain text (e.g., PR #143)
 - No special escaping needed (except `<`, `>`, `&` which are rare in reports)
 
 Do NOT save the report to a permanent file unless the user asks.
@@ -471,8 +481,9 @@ Do NOT save the report to a permanent file unless the user asks.
     findings into the relevant theme naturally (e.g., "Root-caused the
     Fireblocks timeout — ..."). Never use the word "trace" in the output.
 12. The report is sent via Telegram bot using HTML parse mode. Use
-    `<b>` for headers and theme names, `<code>` for repo names and IDs,
-    plain `-` for bullets, and no links (plain "PR #123" text).
+    `<b>` for headers and theme names, `<a href>` links for Linear issues
+    and repo names, `<code>` only for inline code, plain `-` for bullets,
+    and plain "PR #123" text for PR references.
 
 ## Failure modes
 
