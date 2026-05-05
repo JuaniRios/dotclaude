@@ -285,7 +285,13 @@ any comments added today.
 
 ### Agent D — GitHub activity
 
-Use `gh` to find today's PR and issue activity:
+Use `gh` to find today's PR and issue activity.
+
+**IMPORTANT**: `gh search prs --merged` uses GitHub's search index which can
+lag behind actual merge events (sometimes by hours). For merged PRs, query
+each repo directly via `gh pr list` which hits the real-time repo API. Use
+`gh search` only for opened PRs and closed issues where slight lag is
+acceptable.
 
 ```bash
 today=$(date +%Y-%m-%d)
@@ -296,9 +302,27 @@ gh search prs --author="$gh_user" --created=">=$today" --json title,url,reposito
   --jq '.[] | "- [\(.repository.nameWithOwner)] \(.title) (\(.state)) — \(.url)"' 2>/dev/null
 
 echo ""
-echo "### PRs merged today"
-gh search prs --author="$gh_user" --merged=">=$today" --json title,url,repository \
-  --jq '.[] | "- [\(.repository.nameWithOwner)] \(.title) — \(.url)"' 2>/dev/null
+echo "### PRs merged today (per-repo, real-time)"
+for repo in ~/Github/*/; do
+  if [[ "$repo" == *-worktrees* ]]; then continue; fi
+  if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then continue; fi
+
+  # Get the GitHub remote (owner/repo)
+  remote_url=$(git -C "$repo" remote get-url origin 2>/dev/null)
+  if [ -z "$remote_url" ]; then continue; fi
+  # Extract owner/repo from SSH or HTTPS URL
+  nwo=$(echo "$remote_url" | sed -E 's|.*[:/]([^/]+/[^/]+?)(\.git)?$|\1|')
+  if [ -z "$nwo" ]; then continue; fi
+
+  # Query merged PRs authored by user, sorted by most recent
+  merged=$(gh pr list --repo "$nwo" --author "$gh_user" --state merged \
+    --json number,title,mergedAt \
+    --jq ".[] | select(.mergedAt >= \"${today}T00:00:00\") | \"- [$nwo] \(.title) (PR #\(.number))\"" 2>/dev/null)
+
+  if [ -n "$merged" ]; then
+    echo "$merged"
+  fi
+done
 
 echo ""
 echo "### Issues closed today"
