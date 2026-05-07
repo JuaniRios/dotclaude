@@ -19,7 +19,7 @@ Follow these steps precisely.
 Invoke the `cross-review` skill. When it finishes you will have:
 
 - `$out_dir/review.md` — the canonical aggregated report
-- `$out_dir/raw-{opus,sonnet,haiku,codex}.md` — raw reviewer outputs
+- `$out_dir/raw-{opus-a,opus-b,sonnet,codex-a,codex-b}.md` — raw reviewer outputs
 - A printed terminal summary
 
 Record `$out_dir` — you'll reference the report again.

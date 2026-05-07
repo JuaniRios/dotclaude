@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(codex:*), Bash(mkdir:*), Bash(wc:*), Bash(date:*), Bash(basename:*), Bash(test:*), Bash(grep:*), Read, Write, Agent, Skill
-description: Cross-review a pull request by number or URL without checking it out. Runs four reviewers in parallel (Opus, Sonnet, Haiku, Codex), aggregates, and starts a conversation so you can decide which findings (if any) to comment on the PR.
+description: Cross-review a pull request by number or URL without checking it out. Runs five reviewers in parallel (2x Opus, Sonnet, 2x Codex gpt-5.5), aggregates, and starts a conversation so you can decide which findings (if any) to comment on the PR.
 argument-hint: <pr-number | pr-url>
 ---
 
@@ -186,19 +186,20 @@ Do not include preamble, disclaimers, emojis, or summaries. Start directly
 with the first finding (or "### No findings").
 ```
 
-## 6a. Spawn four reviewers in parallel
+## 6a. Spawn five reviewers in parallel
 
-Spawn all four in a **single message with four parallel tool calls**:
+Spawn all five in a **single message with five parallel tool calls**:
 
-1. **Claude Opus** — via the `Agent` tool (`model: "opus"`)
-2. **Claude Sonnet** — via the `Agent` tool (`model: "sonnet"`)
-3. **Claude Haiku** — via the `Agent` tool (`model: "haiku"`)
-4. **OpenAI Codex** — via `Bash` (`run_in_background: true`, `timeout: 600000`)
+1. **Claude Opus A** — via the `Agent` tool (`model: "opus"`)
+2. **Claude Opus B** — via the `Agent` tool (`model: "opus"`)
+3. **Claude Sonnet** — via the `Agent` tool (`model: "sonnet"`)
+4. **Codex gpt-5.5 A** — via `Bash` (`run_in_background: true`, `timeout: 600000`)
+5. **Codex gpt-5.5 B** — via `Bash` (`run_in_background: true`, `timeout: 600000`)
 
-### Reviewers 1-3 — Claude Opus, Sonnet, Haiku (Agent tool)
+### Reviewers 1-3 — Claude Opus A, Opus B, Sonnet (Agent tool)
 
-Spawn three `Agent` tool calls, one per Claude model (`opus`, `sonnet`,
-`haiku`). Each uses `subagent_type: "general-purpose"`.
+Spawn three `Agent` tool calls: two with `model: "opus"`, one with
+`model: "sonnet"`. Each uses `subagent_type: "general-purpose"`.
 The prompt is the shared reviewer text above, plus:
 
 ```
@@ -211,14 +212,18 @@ by the diff that you need for context. Return your review in the format
 specified above — nothing else.
 ```
 
-Write each Agent's output to `$out_dir/raw-opus.md`, `$out_dir/raw-sonnet.md`,
-and `$out_dir/raw-haiku.md` respectively.
+Write each Agent's output to `$out_dir/raw-opus-a.md`,
+`$out_dir/raw-opus-b.md`, and `$out_dir/raw-sonnet.md` respectively.
 
-### Reviewer 4 — OpenAI Codex (Bash)
+### Reviewers 4-5 — Codex gpt-5.5 A and B (Bash)
+
+Spawn two parallel `Bash` calls (both `run_in_background: true`,
+`timeout: 600000`). Both use `-m gpt-5.5`. Replace `$INSTANCE` with `a` or `b`:
 
 ```bash
 cat "$out_dir/diff.patch" | codex exec \
   --sandbox read-only \
+  -m gpt-5.5 \
   -C "$repo_root" \
   "The diff is provided on stdin. Analyze it as a code reviewer.
 
@@ -230,17 +235,17 @@ Repo root: $repo_root
 Read the project docs and any source files referenced by the diff that you
 need for context. Return your review in the format specified above —
 nothing else." \
-  > "$out_dir/codex-stdout.log" 2>&1
+  > "$out_dir/codex-${INSTANCE}-stdout.log" 2>&1
 codex_exit=$?
 
 # Extract review from Codex output.
 # Codex mixes file-read echoes and tool-call logs with the actual review.
 # The review appears after a bare "codex" marker line near the end.
-codex_marker=$(grep -n '^codex$' "$out_dir/codex-stdout.log" | tail -1 | cut -d: -f1)
+codex_marker=$(grep -n '^codex$' "$out_dir/codex-${INSTANCE}-stdout.log" | tail -1 | cut -d: -f1)
 if [ -n "$codex_marker" ]; then
-  tail -n +$((codex_marker + 1)) "$out_dir/codex-stdout.log" \
+  tail -n +$((codex_marker + 1)) "$out_dir/codex-${INSTANCE}-stdout.log" \
     | sed '/^tokens used$/,$d' \
-    > "$out_dir/raw-codex.md"
+    > "$out_dir/raw-codex-${INSTANCE}.md"
 fi
 ```
 

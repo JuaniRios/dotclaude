@@ -1,21 +1,22 @@
 ---
 name: cross-review
-description: Run a multi-agent code review of the current branch/PR. Spawns four senior-engineer reviewers in parallel (Claude Opus, Claude Sonnet, Claude Haiku, OpenAI Codex), aggregates their findings with a Claude Opus aggregator, saves a markdown report, and prints structured findings to the terminal. Use when the user asks for a "cross review", "multi-agent review", "second opinion", "code review of this PR/branch/stack", or any phrasing that implies reviewing the current change set before pushing or handing off.
+description: Run a multi-agent code review of the current branch/PR. Spawns five senior-engineer reviewers in parallel (2x Claude Opus, Claude Sonnet, 2x Codex gpt-5.5), aggregates their findings with a Claude Opus aggregator, saves a markdown report, and prints structured findings to the terminal. Use when the user asks for a "cross review", "multi-agent review", "second opinion", "code review of this PR/branch/stack", or any phrasing that implies reviewing the current change set before pushing or handing off.
 allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(codex:*), Bash(mkdir:*), Bash(wc:*), Bash(date:*), Bash(basename:*), Bash(test:*), Read, Write, Agent
 ---
 
-# Cross-review — four reviewers in parallel
+# Cross-review — five reviewers in parallel
 
 Runs an exhaustive code review of the **current branch's diff against its
-graphite parent** using four independent model reviewers across two provider
-families, then aggregates their findings into one canonical report.
+graphite parent** using five independent reviewer instances across two
+provider families, then aggregates their findings into one canonical report.
 
 Reviewers:
 
-1. **Claude Opus** (via the `Agent` tool, model `opus`)
-2. **Claude Sonnet** (via the `Agent` tool, model `sonnet`)
-3. **Claude Haiku** (via the `Agent` tool, model `haiku`)
-4. **OpenAI Codex** (via `codex exec`, read-only sandbox)
+1. **Claude Opus A** (via the `Agent` tool, model `opus`)
+2. **Claude Opus B** (via the `Agent` tool, model `opus`)
+3. **Claude Sonnet** (via the `Agent` tool, model `sonnet`)
+4. **Codex gpt-5.5 A** (via `codex exec -m gpt-5.5`, read-only sandbox)
+5. **Codex gpt-5.5 B** (via `codex exec -m gpt-5.5`, read-only sandbox)
 
 Aggregator: a **Claude Opus** Agent that merges, dedupes, scores, and
 gives a personal opinion on each finding's validity.
@@ -164,14 +165,14 @@ text and you have a record of what was asked.
 
 ## Step 4 — Spawn reviewers in parallel
 
-All four reviewers must be spawned in a **single message with four parallel
+All five reviewers must be spawned in a **single message with five parallel
 tool calls**. Do not run them sequentially.
 
-### Reviewers 1-3 — Claude Opus, Sonnet, Haiku (Agent tool)
+### Reviewers 1-3 — Claude Opus A, Opus B, Sonnet (Agent tool)
 
-Spawn three `Agent` tool calls, one per Claude model (`opus`, `sonnet`, `haiku`).
-Each uses `subagent_type: "general-purpose"`. The prompt is the shared
-senior-engineer text above, plus:
+Spawn three `Agent` tool calls: two with `model: "opus"`, one with
+`model: "sonnet"`. Each uses `subagent_type: "general-purpose"`. The prompt
+is the shared senior-engineer text above, plus:
 
 ```
 The diff is at: {DIFF_PATH}
@@ -183,14 +184,24 @@ the diff that you need for context. Return your review in the format
 specified above — nothing else.
 ```
 
-Write each Agent's output to `$out_dir/raw-opus.md`, `$out_dir/raw-sonnet.md`,
-and `$out_dir/raw-haiku.md` respectively.
+Write each Agent's output to `$out_dir/raw-opus-a.md`,
+`$out_dir/raw-opus-b.md`, and `$out_dir/raw-sonnet.md` respectively.
 
-### Reviewer 4 — OpenAI Codex (Bash)
+The two Opus instances run the same model at the same effort level — stochastic
+sampling means they will catch different things, which is the point of running
+two instances.
+
+### Reviewers 4-5 — Codex gpt-5.5 A, Codex gpt-5.5 B (Bash)
+
+Spawn two parallel `Bash` calls (both with `run_in_background: true`,
+`timeout: 600000`). Both use `-m gpt-5.5`:
 
 ```bash
+# Run for each instance: A and B
+# Replace $INSTANCE accordingly (a or b).
 cat "$out_dir/diff.patch" | codex exec \
   --sandbox read-only \
+  -m gpt-5.5 \
   -C "$repo_root" \
   "The diff is provided on stdin. Analyze it as a code reviewer.
 
@@ -202,36 +213,30 @@ Repo root: $repo_root
 Read the project docs and any source files referenced by the diff that you
 need for context. Return your review in the format specified above —
 nothing else." \
-  > "$out_dir/codex-stdout.log" 2>&1
-codex_exit=$?
+  > "$out_dir/codex-${INSTANCE}-stdout.log" 2>&1
 
 # Extract review from Codex output.
-# Codex mixes file-read echoes and tool-call logs with the actual review
-# in its output. The review appears after a bare "codex" marker line near
-# the end. Extract from that marker to the "tokens used" footer.
-codex_marker=$(grep -n '^codex$' "$out_dir/codex-stdout.log" | tail -1 | cut -d: -f1)
+# Codex mixes file-read echoes and tool-call logs with the actual review.
+# The review appears after a bare "codex" marker line near the end.
+codex_marker=$(grep -n '^codex$' "$out_dir/codex-${INSTANCE}-stdout.log" | tail -1 | cut -d: -f1)
 if [ -n "$codex_marker" ]; then
-  tail -n +$((codex_marker + 1)) "$out_dir/codex-stdout.log" \
+  tail -n +$((codex_marker + 1)) "$out_dir/codex-${INSTANCE}-stdout.log" \
     | sed '/^tokens used$/,$d' \
-    > "$out_dir/raw-codex.md"
+    > "$out_dir/raw-codex-${INSTANCE}.md"
 fi
 ```
+
+Output files: `raw-codex-a.md` and `raw-codex-b.md`.
 
 Notes:
 - `--sandbox read-only` is non-negotiable — codex must not mutate the repo.
 - The diff is piped via stdin so codex has the content without needing to find
   the file. Codex can still read other repo files for context.
 - `-C` sets the working directory so codex can resolve relative paths.
-- **Output extraction**: Codex mixes internal tool-call output (file reads,
-  grep results, status lines) with the actual review analysis in a single
-  stream. The review portion appears after a bare `codex` marker line near the
-  end of output. The extraction step isolates just the review findings.
+- **Output extraction**: Codex mixes internal tool-call output with review
+  analysis. The review appears after a bare `codex` marker line near the end.
 - If the `codex` marker is not found, the review file will be empty — recorded
   as "reviewer errored" in the aggregator.
-- **Daily quota fallback**: If Codex fails with a daily limit error (look for
-  `rate_limit` or `quota` with reset times in hours), retry once with
-  `-m o3` as a cheaper fallback. Short rate limits (reset in seconds/minutes)
-  should be retried with backoff, not model-switched.
 
 ### Output validation
 
@@ -268,14 +273,15 @@ file contents to the output file (common with Codex), do not use that output.
 
 In a single Claude message, issue:
 
-1. `Agent` call for Opus
-2. `Agent` call for Sonnet
-3. `Agent` call for Haiku
-4. `Bash` call for Codex (use `run_in_background: true`, `timeout: 600000`)
+1. `Agent` call for Opus A
+2. `Agent` call for Opus B
+3. `Agent` call for Sonnet
+4. `Bash` call for Codex gpt-5.5 A (use `run_in_background: true`, `timeout: 600000`)
+5. `Bash` call for Codex gpt-5.5 B (use `run_in_background: true`, `timeout: 600000`)
 
 Claude's runtime parallelizes sibling tool calls in a single assistant message,
-so all four run concurrently. Use `run_in_background: true` on the Bash call
-so Claude can proceed when it finishes rather than blocking.
+so all five run concurrently. Use `run_in_background: true` on the Bash calls
+so Claude can proceed when they finish rather than blocking.
 
 ## Step 4a — Chunk splitting for large diffs
 
@@ -301,9 +307,9 @@ each reviewer within quality range. Each chunk should be under ~3,500 lines.
 
 ### Chunked reviewer dispatch
 
-With N chunks, spawn **4 x N** reviewers (one per model per chunk):
-- N Agent calls per Claude model (Opus, Sonnet, Haiku)
-- One Bash call for Codex that loops over chunks
+With N chunks, spawn **5 x N** reviewers (one per instance per chunk):
+- N Agent calls per Claude instance (Opus A, Opus B, Sonnet)
+- Two Bash calls for Codex (A and B), each looping over chunks
 
 Each reviewer gets the chunk-specific diff path and the same prompt. Output
 files are named `raw-{model}-{chunk}.md` (e.g., `raw-opus-a.md`,
@@ -331,15 +337,16 @@ be a fresh Agent so it has no context pollution from the reviewers.
 Aggregator prompt (paste verbatim):
 
 ```
-You are a senior staff engineer aggregating four independent code reviews of
+You are a senior staff engineer aggregating five independent code reviews of
 the same diff. Your job is to produce a single canonical review report that
 is more reliable than any individual reviewer.
 
-You have four raw reviews:
-- {OPUS_PATH}    (Claude Opus)
-- {SONNET_PATH}  (Claude Sonnet)
-- {HAIKU_PATH}   (Claude Haiku)
-- {CODEX_PATH}   (OpenAI Codex)
+You have five raw reviews:
+- {OPUS_A_PATH}    (Claude Opus A)
+- {OPUS_B_PATH}    (Claude Opus B)
+- {SONNET_PATH}    (Claude Sonnet)
+- {CODEX_A_PATH}   (Codex gpt-5.5 A)
+- {CODEX_B_PATH}   (Codex gpt-5.5 B)
 
 And the diff itself at:
 - {DIFF_PATH}
@@ -354,8 +361,8 @@ Do this:
 3. For each distinct finding across the three reviews:
    a. Merge duplicates — findings that describe the same underlying issue
       should become one entry, even if worded differently.
-   b. Record which reviewer(s) raised it: [opus], [sonnet], [haiku],
-      [codex], or a combination like [opus, sonnet].
+   b. Record which reviewer(s) raised it: [opus-a], [opus-b], [sonnet],
+      [codex-a], [codex-b], or a combination like [opus-a, sonnet].
    c. Verify the finding by reading the relevant code. For each one, form
       YOUR OWN opinion on whether it is:
          - valid: a real issue that should be fixed
@@ -377,7 +384,7 @@ Output format:
 **Parent:** {PARENT_SHA} ({PARENT_BRANCH})
 **Files changed:** {N}
 **Diff size:** {LOC} lines
-**Reviewers:** Claude Opus, Claude Sonnet, Claude Haiku, OpenAI Codex
+**Reviewers:** Claude Opus A, Claude Opus B, Claude Sonnet, Codex gpt-5.5 A, Codex gpt-5.5 B
 **Aggregator:** Claude Opus
 
 ## Summary
@@ -398,7 +405,7 @@ For each finding:
 - **Category:** correctness | security | convention | maintainability | tests
 - **Validity:** valid | likely | disputed | invalid | out-of-scope
 - **Confidence:** <0-100>
-- **Found by:** [opus], [sonnet], [haiku], [codex], or a list
+- **Found by:** [opus-a], [opus-b], [sonnet], [codex-a], [codex-b], or a list
 - **Issue:** <one paragraph>
 - **Why it matters:** <concrete consequence>
 - **Recommended fix:** <specific action>
@@ -489,11 +496,13 @@ claude-local-ctx/reviews/<ts>-<branch>/
 ├── diff.patch          # the reviewed diff
 ├── files.txt           # file change manifest
 ├── prompt.txt          # the reviewer prompt (for reproducibility)
-├── raw-opus.md         # Claude Opus's raw review
+├── raw-opus-a.md       # Claude Opus A's raw review
+├── raw-opus-b.md       # Claude Opus B's raw review
 ├── raw-sonnet.md       # Claude Sonnet's raw review
-├── raw-haiku.md        # Claude Haiku's raw review
-├── raw-codex.md        # OpenAI Codex's raw review
-├── codex-stdout.log    # Codex session log (for debugging)
+├── raw-codex-a.md      # Codex gpt-5.5 A's raw review
+├── raw-codex-b.md      # Codex gpt-5.5 B's raw review
+├── codex-a-stdout.log  # Codex A session log (for debugging)
+├── codex-b-stdout.log  # Codex B session log (for debugging)
 └── review.md           # the aggregated canonical report
 ```
 
@@ -506,15 +515,18 @@ claude-local-ctx/reviews/<ts>-<branch>/
 ├── chunk-b-<label>.patch
 ├── files.txt
 ├── prompt.txt
-├── raw-opus-a.md           # per-chunk per-model raw reviews
-├── raw-opus-b.md
-├── raw-sonnet-a.md
-├── raw-sonnet-b.md
-├── raw-haiku-a.md
-├── raw-haiku-b.md
-├── raw-codex-a.md
-├── raw-codex-b.md
-├── codex-stdout.log
+├── raw-opus-a-chunk-a.md   # per-chunk per-model raw reviews
+├── raw-opus-a-chunk-b.md
+├── raw-opus-b-chunk-a.md
+├── raw-opus-b-chunk-b.md
+├── raw-sonnet-chunk-a.md
+├── raw-sonnet-chunk-b.md
+├── raw-codex-a-chunk-a.md
+├── raw-codex-a-chunk-b.md
+├── raw-codex-b-chunk-a.md
+├── raw-codex-b-chunk-b.md
+├── codex-a-stdout.log
+├── codex-b-stdout.log
 └── review.md               # single aggregated report across all chunks
 ```
 
