@@ -262,15 +262,15 @@ Use the `linear` CLI to find today's issue activity:
 today=$(date +%Y-%m-%d)
 
 echo "### Issues completed today"
-linear issue mine --state completed --updated-after="$today" --no-pager 2>/dev/null
+linear issue mine --state completed --updated-after="$today" --sort priority --team RAI --no-pager 2>/dev/null
 
 echo ""
 echo "### Issues started today"
-linear issue mine --state started --updated-after="$today" --no-pager 2>/dev/null
+linear issue mine --state started --updated-after="$today" --sort priority --team RAI --no-pager 2>/dev/null
 
 echo ""
 echo "### Issues updated today (all states)"
-linear issue mine --all-states --updated-after="$today" --no-pager 2>/dev/null
+linear issue mine --all-states --updated-after="$today" --sort priority --team RAI --no-pager 2>/dev/null
 ```
 
 For each issue that was completed or started, also get details:

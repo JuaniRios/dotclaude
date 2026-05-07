@@ -113,7 +113,7 @@ linear issue view -a       # open in Linear.app
 linear issue id            # print ID from current branch
 linear issue title         # print title only
 linear issue url           # print Linear URL
-linear issue mine          # issues assigned to you
+linear issue mine --sort priority --team RAI   # issues assigned to you (requires --sort and --team)
 linear issue query --search "text"                         # team-scoped search
 linear issue query --search "text" --team ENG --json       # structured output
 linear issue query --all-teams --json --limit 0            # export all
@@ -207,8 +207,8 @@ linear api '<query>'       # raw GraphQL request
 
 Some commands have non-obvious required flags. Hit `--help` before running:
 
-- `linear issue list` requires a sort order — pass `--sort priority` or `--sort manual`, or set `issue_sort` in `.linear.toml`, or export `LINEAR_ISSUE_SORT`. It also needs `--team <key>` unless the team can be inferred from the directory. If unknown, run `linear team list` first to find the key.
-- `--no-pager` is only supported on `linear issue list` — it will error on `project list` and friends.
+- `linear issue list` and `linear issue mine` both require a sort order — pass `--sort priority` or `--sort manual`, or set `issue_sort` in `.linear.toml`, or export `LINEAR_ISSUE_SORT`. They also need `--team <key>` unless the team can be inferred from the directory (e.g. via `.linear.toml`). If unknown, run `linear team list` first to find the key.
+- `--no-pager` is supported on `issue list`, `issue mine`, and `issue query` — it will error on `project list` and friends.
 - Many commands infer the current issue from the branch name (via the VCS
   integration). If the branch doesn't encode an ID, pass the ID explicitly.
 - `linear issue create` gotchas:
