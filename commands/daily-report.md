@@ -42,11 +42,18 @@ Then send via Telegram (Step 4) as normal. If the argument is NOT
 
 ## Step 1 — Determine date range
 
-Use today's date (local timezone). Compute the start-of-day timestamp in
-both ISO format and Unix milliseconds:
+Use local timezone. If the current local time is before 05:00, treat the
+report as belonging to **yesterday** (the workday hasn't ended yet — the
+user is still wrapping up the previous day's work).
 
 ```bash
-today=$(date +%Y-%m-%d)
+current_hour=$(date +%H)
+if [ "$current_hour" -lt 5 ]; then
+  today=$(date -v-1d +%Y-%m-%d)
+  echo "Before 5 AM — reporting on previous day"
+else
+  today=$(date +%Y-%m-%d)
+fi
 today_start_epoch_ms=$(date -j -f "%Y-%m-%d %H:%M:%S" "$today 00:00:00" +%s)000
 echo "Report date: $today"
 echo "Epoch ms start: $today_start_epoch_ms"
