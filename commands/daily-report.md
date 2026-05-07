@@ -438,10 +438,8 @@ bugs, duration for incidents, and deployment state for fixes.}
 
 📊 <b>Stats</b>
 - <b>PRs opened:</b> {n} — list each with repo
-- <b>Same-day open→merge:</b> {n} — PRs opened and merged on the same day
-  (include turnaround time if notable)
-- <b>Prior-day open, merged today:</b> {n} — PRs opened before today that
-  were merged today
+- <b>PRs merged:</b> {n} — list each with time-to-merge (e.g., "PR #640
+  (7h)", "PR #633 (21h)"). Compute from createdAt→mergedAt via gh API.
 - <b>Linear issues:</b> {n} completed · {n} started · {n} created
 - <b>PR↔issue coverage:</b> {n}/{total} PRs have a linked Linear issue.
   Flag any PRs missing a corresponding issue.
