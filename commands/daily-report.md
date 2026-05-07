@@ -373,6 +373,21 @@ Are these the main things to talk about? Any corrections on status,
 emphasis, or things I missed?
 ```
 
+Also check PR↔issue coverage. For every PR opened or merged today, check
+if its title or body contains a `RAI-\d+` reference. If any PRs are missing
+a corresponding Linear issue, flag them in the summary:
+
+```
+⚠️ PRs without a Linear issue:
+- PR #145 (st0x.issuance) — enhance /admin/stuck endpoint
+  → Want me to create a Linear issue and link it?
+```
+
+If the user says yes, create the Linear issue using the `linear` CLI
+(follow the linear-cli skill rules — draft, show, confirm, then create).
+Then update the PR description to include the new issue ID. Do this before
+proceeding to Step 3.
+
 Wait for the user's response. Incorporate their feedback into the
 synthesis — their input overrides your inferences. For example:
 - If the user says "prod is down" → Status is 🔴, not 🟡
@@ -442,7 +457,8 @@ bugs, duration for incidents, and deployment state for fixes.}
   (7h)", "PR #633 (21h)"). Compute from createdAt→mergedAt via gh API.
 - <b>Linear issues:</b> {n} completed · {n} started · {n} created
 - <b>PR↔issue coverage:</b> {n}/{total} PRs have a linked Linear issue.
-  Flag any PRs missing a corresponding issue.
+  Flag any PRs missing a corresponding issue. A PR "has" an issue if
+  its title or body contains a RAI-\d+ reference.
 - <b>Lines changed:</b> +{ins} / -{del} (aggregate across all repos, from
   git log --shortstat for commits authored today)
 - <b>Repos touched:</b> {n} — list repo names with links
