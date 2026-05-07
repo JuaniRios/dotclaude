@@ -15,10 +15,9 @@ When invoked as `/daily-report compressed`, produce a much shorter report.
 Still run all the same data collection (Steps 1–2), but in Step 3 compress
 the output to ~10-15 lines max:
 
-- No Stats section
-- No Open Points / Blockers section (unless critical)
+- Status section becomes 1 line (🟢/🟡/🔴 + one sentence)
+- No Action Items section (unless 🔴 items exist)
 - "What Was Done" becomes 3-5 one-line bullets (one per theme, no sub-bullets)
-- "What's Next" becomes 2-3 one-line bullets
 - No theme sub-headings — just a flat list
 
 Compressed format example:
@@ -26,16 +25,16 @@ Compressed format example:
 ```
 📋 <b>Daily Report — {date}</b>
 
-✅ <b>Done</b>
-- [st0x.issuance] Built unified redemption recovery endpoint, PR #143 in review (RAI-281)
-- [st0x.liquidity] Fixed silent WebSocket stream failure in OrderFillMonitor, PR #631
-- [st0x.liquidity] Addressed PR feedback on #629, #616, #628; created RAI-291 for event-sorcery extraction
-- Completed RAI-272 (nix secret rekeying fix)
+🟡 <b>Status:</b> Prod manually patched but code fix still in PR #642 — will crash on next non-USDC TakeOrder.
 
-📌 <b>Next</b>
-- Merge all open PRs, recover stuck issuance funds, deploy stream fix
-- Unblock staging, test hedging, deploy to prod if green
-- Review 14 PRs awaiting my review
+✅ <b>Done</b>
+- [st0x.issuance] Recovered stuck mint, triaged queue, PR #145 open (RAI-364)
+- [st0x.liquidity] Fixed orphaned order bug, merged PR #640; resilient transfers PR #641 open (RAI-365, RAI-366)
+- [st0x.liquidity] Deployed 3 new tokens to prod, fixed crash-loop, PR #642 open (RAI-367)
+- [st0x.liquidity] Merged dashboard PRs #633–#635; closed Schwab/Alpaca removal (RAI-140, RAI-166, RAI-247, RAI-99)
+
+⚡ <b>Urgent</b>
+- 🔴 Merge #642 — prod crashes on non-USDC TakeOrder events
 ```
 
 Then send via Telegram (Step 4) as normal. If the argument is NOT
@@ -53,7 +52,7 @@ echo "Report date: $today"
 echo "Epoch ms start: $today_start_epoch_ms"
 ```
 
-## Step 2 — Collect data (run all three in parallel using Agent sub-agents)
+## Step 2 — Collect data (run all four in parallel using Agent sub-agents)
 
 Launch four parallel sub-agents to collect data simultaneously. Each agent
 should return structured findings.
@@ -125,6 +124,8 @@ opening request and final state. Extract:
 - What the user asked for (user messages)
 - What was accomplished (look for tool calls, file edits, commits)
 - Whether the work seems complete or in-progress
+- **Any production incidents, outages, or manual interventions**
+- **Root causes identified and whether fixes are shipped or still in PRs**
 
 ### Agent B — Git activity across all repos
 
@@ -283,6 +284,11 @@ linear issue view <ID> --no-pager 2>/dev/null
 This reveals what tickets were worked on, their status transitions, and
 any comments added today.
 
+**Fallback if `linear` CLI fails**: grep all git commit messages and session
+data for `RAI-\d+` patterns. Deduplicate and report as "referenced issues
+(Linear CLI unavailable)". This is better than silently dropping all Linear
+context.
+
 ### Agent D — GitHub activity
 
 Use `gh` to find today's PR and issue activity.
@@ -330,20 +336,116 @@ gh search issues --author="$gh_user" --closed=">=$today" --json title,url,reposi
   --jq '.[] | "- [\(.repository.nameWithOwner)] \(.title) — \(.url)"' 2>/dev/null
 ```
 
+## Step 2.5 — User review before writing
+
+Once all four agents return, compile a short summary of what you found and
+present it to the user for review using `AskUserQuestion`. This lets the
+user correct emphasis, flag things you missed, or add context you couldn't
+infer from the data (e.g., "prod is currently down", "this issue is the
+most important one").
+
+Format the summary as a bulleted list of proposed themes with key items:
+
+```
+Here's what I found for today's report:
+
+🚦 Status: [your best guess — 🟢/🟡/🔴 + why]
+
+Proposed themes:
+- Prod incident: crash-loop, manual SQL patch, PR #642 pending
+- Orphaned order fix: RKLB stuck, recovery merged (PR #640)
+- Issuance: stuck mint recovered, PR #145 open
+- Dashboard + cleanup: PRs #633–635 merged, Schwab/Alpaca removal done
+
+Linear: 7 completed, 3 started
+PRs: 4 opened, 4 merged
+
+Are these the main things to talk about? Any corrections on status,
+emphasis, or things I missed?
+```
+
+Wait for the user's response. Incorporate their feedback into the
+synthesis — their input overrides your inferences. For example:
+- If the user says "prod is down" → Status is 🔴, not 🟡
+- If the user says "the issuance fix is most important" → lead with that
+- If the user adds context not in the data → include it
+
+Only proceed to Step 3 after the user confirms or provides corrections.
+In compressed mode, still do this review step but keep the summary shorter.
+
 ## Step 3 — Synthesize the report
 
-Once all three agents return their data, synthesize into a single markdown
-report with these sections. Use thematic grouping — cluster work into 3-5
-themes rather than listing every commit or prompt.
+Once the user has reviewed and confirmed, synthesize into a single report.
+This is the most important step — you are not just listing outputs, you are
+**connecting dots across data sources** to tell a coherent story.
 
-### Report format
+### Synthesis rules
 
-Use Telegram HTML formatting. `<b>` for headers and theme names,
-plain `-` for bullets, `<code>` only for inline code snippets (function
-names, endpoints, error messages). Blank lines separate sections. Every
-section header and theme name MUST start with an emoji.
+Before writing, answer these questions from the collected data (and the
+user's corrections from Step 2.5):
 
-**Hyperlinks** — make references clickable using `<a href="...">`:
+1. **System health**: Is anything broken, degraded, or at risk in production
+   right now? Was there a prod incident today? Was it fully resolved (code
+   fix deployed) or only manually patched (fix still in PR)?
+2. **Impact & duration**: If an outage or blind spot was discovered, how long
+   did it last? What's the business impact (e.g., assets not hedged, funds
+   stuck, users affected)?
+3. **Ship status**: For each piece of work, what's the deployment state?
+   Distinguish clearly between:
+   - ✅ Merged and deployed to prod
+   - 🟡 Merged to main (not yet deployed)
+   - 🟠 PR open, in review
+   - 🔴 PR open, blocked (CI failing, review requested changes)
+   - 🩹 Manually patched in prod (code fix not yet merged)
+4. **Completeness**: Cross-reference Linear issues against git commits and
+   PRs. If issues were completed today, make sure the corresponding work
+   appears in the report. If git commits reference issue IDs not found in
+   Linear data, include them anyway.
+
+### Report structure
+
+```
+📋 <b>Daily Report — {date}</b>
+
+🚦 <b>Status</b>
+{1-3 lines. Traffic light: 🟢 all systems healthy | 🟡 degraded or
+at-risk | 🔴 prod down or critical issue. State what's wrong and what
+needs to happen. If all green, say so in one line.}
+
+✅ <b>What Was Done</b>
+
+{Thematic groups. Each theme gets an emoji + bold name + repo link.
+2-4 bullets per theme. Lead with OUTCOME ("Dashboard now shows X")
+not activity ("Merged PR that changes X"). Include root causes for
+bugs, duration for incidents, and deployment state for fixes.}
+
+⚡ <b>Action Items</b>
+{Priority-ordered list. Each item gets a marker:
+- 🔴 Urgent — prod at risk, blocks others, time-sensitive
+- 🟡 Important — should happen soon but not critical
+- 🟢 Normal — review, cleanup, follow-up}
+
+PRs opened: {n} | merged: {n} | Linear completed: {n} | started: {n}
+```
+
+### Theme guidelines
+
+- Group by **outcome**, not by repo or activity type. "Dashboard accuracy
+  improvements" is better than "PRs #633, #634, #635 merged."
+- Lead each bullet with what changed for the user/system, then the how.
+  "Hedging now covers QQQM, VWO, ARKK — added to prod config" not
+  "Added QQQM, VWO, ARKK to prod config."
+- Include root causes for bugs — a manager needs to know if this is a
+  one-off or a systemic issue.
+- State incident duration when known: "PPLT/SIVR/IAU had no hedging
+  coverage for 12 days (Apr 24 – May 6)" not just "WebSocket stream
+  died."
+- If a manual fix was applied to prod but the code fix is still in a PR,
+  say so explicitly — this is a risk the team needs to track.
+
+### Hyperlinks
+
+Make references clickable using `<a href="...">`:
 - Linear issues: `<a href="https://linear.app/makeitrain/issue/RAI-280">RAI-280</a>`
 - Repo names: `<a href="https://github.com/ST0x-Technology/st0x.liquidity">st0x.liquidity</a>`
 - PR references: `<a href="https://app.graphite.dev/github/pr/ST0x-Technology/st0x.liquidity/633">PR #633</a>`
@@ -351,54 +453,20 @@ section header and theme name MUST start with an emoji.
 - For repos, derive the GitHub org/repo from the git remote of each repo
   in `~/Github/`. The org is typically `ST0x-Technology` or `rainlanguage`.
 
-Emoji conventions:
+### Emoji conventions
+
 - 📋 Title
+- 🚦 Status
 - ✅ What Was Done
 - 🔧 Bug fix / reliability theme
 - 🏗 Architecture / infrastructure theme
-- 🚀 Feature development theme
+- 🚀 Feature / capability theme
+- 🧹 Cleanup / tech debt theme
 - 📦 Other / miscellaneous theme
-- 📌 What's Next
-- ⚠️ Open Points / Blockers
-- 📊 Stats
+- ⚡ Action Items
 
-Pick the most fitting emoji per theme from the list above (or use another
-relevant one if none fits). The key rule: every `<b>` header gets an emoji
-prefix.
-
-Example:
-
-```
-📋 <b>Daily Report — {today's date}</b>
-
-{2-3 sentences in first person.}
-
-✅ <b>What Was Done</b>
-
-🔧 <b>{Theme Name}</b> — <a href="https://github.com/ST0x-Technology/st0x.liquidity">st0x.liquidity</a>
-- 2-4 bullet points of what was accomplished, written in first person
-- Link repo names: <a href="https://github.com/ST0x-Technology/st0x.liquidity">st0x.liquidity</a>
-- Link Linear issue IDs: <a href="https://linear.app/makeitrain/issue/RAI-280">RAI-280</a>
-- Link PRs to Graphite: <a href="https://app.graphite.dev/github/pr/ST0x-Technology/st0x.liquidity/143">PR #143</a>
-
-Only create a theme if the work exceeded ~10 minutes. Small tasks go under
-"📦 Other".
-
-📌 <b>What's Next</b>
-- Open PRs awaiting review
-- In-progress sessions that weren't completed
-- TODO items or follow-ups mentioned in session conversations
-
-⚠️ <b>Open Points / Blockers</b>
-- Failing CI on any branches
-- PRs with requested changes
-- Any issues mentioned in sessions that weren't resolved
-
-📊 <b>Stats</b>
-- Merged: <a href="...">repo</a> <a href="...">PR #X</a>, <a href="...">repo</a> <a href="...">PR #Y</a>, ...
-- PRs opened: {count} | merged: {count}
-- Linear issues: completed: {count} | started: {count} | created: {count}
-```
+Pick the most fitting emoji per theme (or use another relevant one if none
+fits). Every `<b>` header gets an emoji prefix.
 
 ## Step 4 — Send via Telegram
 
@@ -445,7 +513,7 @@ else:
 Use Telegram's HTML parse mode — it's more reliable than MarkdownV2:
 - `<b>text</b>` for section headers and theme names
 - `<a href="...">text</a>` for Linear issues and repo names (see
-  Hyperlinks section in Report format above)
+  Hyperlinks section above)
 - `<code>text</code>` only for inline code (function names, endpoints,
   error messages) — NOT for repo names or issue IDs
 - Plain `-` for bullets
@@ -462,11 +530,12 @@ Do NOT save the report to a permanent file unless the user asks.
 3. Thematic grouping over flat lists — cluster related work, never dump raw
    commit messages.
 4. If `gh` or `linear` is not authenticated or fails, skip that section
-   gracefully and note it in the report.
+   gracefully and note it in the report. For `linear`, fall back to
+   extracting issue IDs from git commit messages and session data.
 5. If no activity is found for the day, say so clearly — don't fabricate.
 6. Include worktree activity — the user works across multiple worktrees of
    the same repo.
-7. Keep the report concise: aim for one screen (40-60 lines of markdown).
+7. Keep the report concise: aim for one screen (40-60 lines).
 8. Write the entire report in first person ("I fixed...", "I investigated...")
    — this is pasted directly into a team group chat.
 9. Never mention internal tooling or process in the output. This includes:
@@ -486,6 +555,24 @@ Do NOT save the report to a permanent file unless the user asks.
     `<b>` for headers and theme names, `<a href>` links for Linear issues,
     repo names, and PR numbers (linking to Graphite), `<code>` only for
     inline code, and plain `-` for bullets.
+13. **Production risk awareness**: Pay close attention to whether prod is
+    currently functional or actively broken. Key signals from session data:
+    crash-loops, error logs, manual restarts, "prod is down" mentions,
+    events that trigger crashes repeatedly. If prod is actively crashing
+    or down, Status is 🔴 — not 🟡. If a manual patch was applied but the
+    root cause still triggers (e.g., a recurring event type that crashes
+    the bot), prod is still 🔴 because it will crash again. Only use 🟡
+    when prod is running but the fix is unmerged and the trigger is rare
+    or unlikely. Never report a manual patch as "fixed" — it's "stabilized,
+    fix pending in PR #X" (🟡) or "still crashing, fix in PR #X" (🔴).
+14. **Cross-reference all data sources**: Don't report each agent's data in
+    isolation. Connect Linear issues to PRs to git commits. If a Linear
+    issue was completed but no corresponding PR appears, investigate. If a
+    PR was merged but the corresponding Linear issue isn't marked done,
+    note the discrepancy.
+15. **State incident duration**: When a bug or outage is discovered, always
+    state how long it lasted if the data is available (e.g., from log
+    timestamps, git history, or session conversations).
 
 ## Failure modes
 
@@ -493,8 +580,10 @@ Do NOT save the report to a permanent file unless the user asks.
   today" and proceeds with git/GitHub data only.
 - **`gh` not authenticated**: Skip GitHub section, add a note: "GitHub
   activity skipped (gh not authenticated)".
-- **`linear` not authenticated**: Skip Linear section, add a note: "Linear
-  activity skipped (linear not authenticated)".
+- **`linear` not authenticated or fails**: Fall back to extracting issue
+  IDs (e.g., `RAI-\d+`) from git commit messages and session text. Report
+  these as "referenced issues" and note: "Linear CLI unavailable — issue
+  statuses not verified."
 - **No git repos found**: Report focuses on session activity only.
 - **history.jsonl missing**: Fall back to scanning session JSONL files by
   modification date (`find ~/.claude/projects -name '*.jsonl' -newer
