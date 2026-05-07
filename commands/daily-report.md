@@ -432,7 +432,18 @@ bugs, duration for incidents, and deployment state for fixes.}
 - 🟡 Important — should happen soon but not critical
 - 🟢 Normal — review, cleanup, follow-up}
 
-PRs opened: {n} | merged: {n} | Linear completed: {n} | started: {n}
+📊 <b>Stats</b>
+- <b>PRs opened:</b> {n} — list each with repo
+- <b>Same-day open→merge:</b> {n} — PRs opened and merged on the same day
+  (include turnaround time if notable)
+- <b>Prior-day open, merged today:</b> {n} — PRs opened before today that
+  were merged today
+- <b>Linear issues:</b> {n} completed · {n} started · {n} created
+- <b>PR↔issue coverage:</b> {n}/{total} PRs have a linked Linear issue.
+  Flag any PRs missing a corresponding issue.
+- <b>Lines changed:</b> +{ins} / -{del} (aggregate across all repos, from
+  git log --shortstat for commits authored today)
+- <b>Repos touched:</b> {n} — list repo names with links
 ```
 
 ### Theme guidelines
