@@ -6,7 +6,7 @@ argument-hint: <pr-number | pr-url>
 
 Cross-review a pull request that is **not** currently checked out. The PR
 number or URL is passed in `$ARGUMENTS`. Use when you're reviewing someone
-else's PR and want independent, three-model analysis before commenting.
+else's PR and want independent, multi-model analysis before commenting.
 
 Follow these steps precisely.
 
@@ -257,7 +257,7 @@ Notes:
 
 ### Output validation
 
-After all three finish, validate each output file:
+After all five finish, validate each output file:
 
 ```bash
 validate_review() {
@@ -270,13 +270,13 @@ validate_review() {
 ```
 
 If a reviewer errors, record it as "reviewer errored" in the aggregator and
-continue. Two reviewers is still valuable. If all three error, stop.
+continue. If all five error, stop.
 
 ### Failure modes
 
-- **Codex or Gemini not installed**: Check `command -v codex gemini` before
-  spawning. If missing, warn the user and run with only the available
-  reviewers. A single-model review is better than aborting.
+- **Codex not installed**: Check `command -v codex` before spawning. If
+  missing, warn the user and run with Claude-only reviewers. Three
+  reviewers is still valuable.
 
 ## 7. Aggregate with review-pr-specific output
 
