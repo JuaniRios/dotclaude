@@ -113,17 +113,9 @@ Keep only the paths. Reviewers will read them themselves.
 
 ## 6. Build the reviewer prompts
 
-Build per-reviewer prompts following the `cross-review` skill's Step 3
-structure: a **shared base prompt** plus a **per-reviewer focus paragraph**.
-Each reviewer gets a different focus to maximize coverage diversity:
-
-- **Opus A**: concurrency & async ordering
-- **Opus B**: goal evaluation & domain logic (adversarial)
-- **Sonnet**: error handling & failure modes
-- **Codex A**: edge cases & boundary conditions
-- **Codex B**: broad general sweep
-
-See the cross-review skill for the exact focus paragraph text.
+Build per-reviewer prompts: a **shared base prompt** plus a **per-reviewer
+focus paragraph**. Each reviewer gets a different focus to maximize coverage
+diversity.
 
 Save each to `$out_dir/prompt-{reviewer}.txt`.
 
@@ -206,6 +198,56 @@ If you find nothing worth raising, output exactly:
 
 Do not include preamble, disclaimers, emojis, or summaries. Start directly
 with the first finding (or "### No findings").
+```
+
+### Per-reviewer focus paragraphs
+
+Append one of these to the base prompt for each reviewer:
+
+**Opus A — Concurrency & async ordering:**
+```
+YOUR FOCUS: Pay special attention to the ordering of async operations
+during setup, teardown, and reconnection. When two async steps happen in
+sequence (subscribe then query, or query then subscribe), consider what
+happens if the world changes between them. Look for TOCTOU gaps in async
+setup sequences, concurrent writers to shared state, and assumptions about
+which operation completes first.
+```
+
+**Opus B — Goal evaluation & domain logic:**
+```
+YOUR FOCUS: Read the PR description carefully, then evaluate whether the
+implementation actually achieves what it claims. If the PR says "events
+are never lost," find a scenario where they could be. If it says
+"checkpoint only advances safely," find a case where it doesn't. Be
+adversarial about the stated goals — your job is to find the gap between
+intent and implementation.
+```
+
+**Sonnet — Error handling & failure modes:**
+```
+YOUR FOCUS: Trace every error path and failure mode. What happens when a
+database write fails mid-operation? When a background job exhausts its
+retries? When a network call times out during a multi-step process? Look
+for silent failures, missing error propagation, and recovery paths that
+leave the system in an inconsistent state.
+```
+
+**Codex A — Edge cases & boundary conditions:**
+```
+YOUR FOCUS: Look for edge cases at boundaries. What happens at block 0?
+When a range is empty? When both inputs are equal? When an optional value
+is None for the first time? When a counter overflows? Find the inputs
+that the author probably didn't test.
+```
+
+**Codex B — Broad general sweep:**
+```
+YOUR FOCUS: Do a broad, unbiased review. Don't focus on any particular
+category — instead, try to find anything the other reviewers might miss.
+Look at the change holistically: does the overall design make sense? Are
+there interactions between components that could produce surprising
+behavior? Are there implicit assumptions that aren't documented?
 ```
 
 ## 6a. Spawn five reviewers in parallel
@@ -302,8 +344,8 @@ continue. If all five error, stop.
 
 ## 7. Aggregate with review-pr-specific output
 
-The aggregator produces `$out_dir/review.md` — same format as the
-`cross-review` skill, **except**:
+The aggregator produces `$out_dir/review.md` with the following
+adaptations for PR review context:
 
 - **No AI references anywhere in output.** No agent attribution, no
   "Found by:", no mention of models, reviewers, or cross-review. The
@@ -317,8 +359,7 @@ The aggregator produces `$out_dir/review.md` — same format as the
 
 ## 8. Print findings to the terminal
 
-Print a compact summary, same format as `cross-review` but without agent
-attribution on each finding:
+Print a compact summary without agent attribution on each finding:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -470,7 +511,7 @@ reads as targeted inline feedback, not a wall of text.
    not a one-shot.
 6. If the PR is closed/merged/draft, ask before proceeding.
 7. **Posted reviews must read like a human wrote them.** No AI references
-   (models, agents, "cross-review", Claude, Codex, Gemini). No numbered
+   (models, agents, Claude, Codex, Gemini). No numbered
    finding prefixes (`#1`, `**#2 (HIGH)**`). No em dashes. No bold
    severity labels. Use lowercase severity prefixes (`critical:`,
    `should fix:`, `minor:`, `nit:`) to signal importance. Write short,

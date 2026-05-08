@@ -252,7 +252,7 @@ implementation, use this workflow:
 
    - File: `src/foo.rs:42`
    - Finding: <bug summary>
-   - Reviewer: opus/codex/gemini (if from /cross-review)
+   - Reviewer: opus/codex/gemini (if from /review-loop or /review-pr)
 
    ## Proposed fix
 

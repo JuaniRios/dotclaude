@@ -1,10 +1,10 @@
 ---
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(find:*), Bash(date:*), Bash(test:*), Bash(ls:*), Bash(jq:*), Bash(mktemp:*), Bash(cat:*), Bash(rm:*), Bash(wc:*), Read, Grep, Glob, Agent
-description: Publish cross-review findings as a pending GitHub PR review with inline comments. Run after /review-pr.
+description: Publish review findings as a pending GitHub PR review with inline comments. Run after /review-pr.
 argument-hint: [review-dir-path]
 ---
 
-Publish findings from a cross-review report as a **pending** GitHub PR review
+Publish findings from a review report as a **pending** GitHub PR review
 with inline comments. The user runs this after `/review-pr` to push findings
 onto the PR for inspection on the Graphite dashboard.
 

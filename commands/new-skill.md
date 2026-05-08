@@ -20,7 +20,6 @@ immediately available.
     review-loop.md
     review-pr.md
   skills/                    # skills — subdirectory with SKILL.md each
-    cross-review/SKILL.md    #   auto-matched by description
     graphite/SKILL.md
     linear-cli/SKILL.md
 
