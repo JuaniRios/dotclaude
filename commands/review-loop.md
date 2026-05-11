@@ -709,6 +709,13 @@ is to catch issues introduced by fixes — you cannot know whether fixes
 introduced new issues without re-reviewing. Only the review determines
 when the loop is done, not your judgment.
 
+**CRITICAL: Convergence requires a CLEAN review pass.** The loop is ONLY
+done when a review pass returns no new actionable findings. Fixing the
+last batch of findings is NOT convergence — you must run another review
+to verify those fixes didn't introduce new issues. The pattern is always:
+`review → fix → review → fix → review(clean) → done`. You can never
+end on a fix — you must always end on a clean review.
+
 1. Re-run **steps 2 through 7** in full — resolve scope, generate the
    diff, build prompts, spawn all five reviewers, aggregate, and print
    findings. The diff will now include the fixes (current state vs
@@ -730,10 +737,12 @@ when the loop is done, not your judgment.
    - If **new findings remain**: increment the review iteration counter,
      loop back to step 8 (triage) with only the new findings.
 
-**Cap at 3 review iterations** (initial + 2 re-reviews). If new findings
-keep appearing after 3 iterations, stop and tell the user — the fixes are
-likely introducing as many issues as they solve, and a human needs to
-assess the approach.
+**Cap at 4 review passes** (initial + up to 3 re-reviews). A re-review
+that finds new issues counts as a pass; fixing those issues and
+re-reviewing to confirm they're clean counts as another pass. If new
+findings keep appearing after 4 passes, stop and tell the user — the
+fixes are likely introducing as many issues as they solve, and a human
+needs to assess the approach.
 
 Print a status line at the start of each iteration:
 
@@ -904,7 +913,7 @@ mutation — the user decides when to amend and push.
    fixes — the code may have changed since the review.
 7. Keep fixes surgical. No "while I'm here" cleanups.
 8. After all fixes, run `/ci` and report results before re-reviewing.
-9. Cap at 3 review iterations. Stop and ask the user if you don't converge.
+9. Cap at 4 review passes. Convergence requires a clean pass — never end on a fix. Stop and ask the user if you don't converge.
 10. Spawn all reviewers in a single message with parallel tool calls.
 11. Use `--sandbox read-only` for codex — non-negotiable.
 12. The aggregator is a separate Agent call, never reuse the main session
