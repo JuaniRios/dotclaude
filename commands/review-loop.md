@@ -226,10 +226,10 @@ behavior? Are there implicit assumptions that aren't documented?
 
 Save each complete prompt (base + focus) to `$out_dir/prompt-{reviewer}.txt`.
 
-## 5. Spawn five reviewers in parallel
+## 5. Spawn reviewers and inspectors in parallel
 
-All five reviewers must be spawned in a **single message with five parallel
-tool calls**. Do not run them sequentially.
+All reviewers and inspectors must be spawned in a **single message with
+parallel tool calls**. Do not run them sequentially.
 
 ### Reviewers 1-3 — Claude Opus A, Opus B, Sonnet (Agent tool)
 
@@ -255,6 +255,54 @@ specified above — nothing else.
 
 Write each Agent's output to `$out_dir/raw-opus-a.md`,
 `$out_dir/raw-opus-b.md`, and `$out_dir/raw-sonnet.md` respectively.
+
+### Inspector agents — Test Inspector and Idiomatic Rust Inspector
+
+Alongside the five reviewers, spawn two additional specialized inspector
+agents. These produce structured reports in their own format (not the
+reviewer finding format) and feed into the aggregator as supplementary
+input.
+
+**Test Inspector** — `model: "sonnet"`, `subagent_type: "general-purpose"`:
+
+Prompt: the full content of the `/test-inspector` command skill
+(`~/Github/dotclaude/commands/test-inspector.md`, everything below the
+frontmatter). Replace `$ARGUMENTS` with the empty string (use the current
+branch). Append:
+
+```
+The diff is at: {DIFF_PATH}
+Repo root: {REPO_ROOT}
+
+Read the diff to identify test files. Read the full test files and the
+source files they test. Produce your inspection report. If no test files
+are in the diff, say so and stop.
+```
+
+Write output to `$out_dir/raw-test-inspector.md`.
+
+**Idiomatic Rust Inspector** — `model: "opus"`, `subagent_type: "general-purpose"`:
+
+Prompt: the full content of the `/idiomatic-rust-inspector` command skill
+(`~/Github/dotclaude/commands/idiomatic-rust-inspector.md`, everything
+below the frontmatter). Replace `$ARGUMENTS` with the empty string (use
+the current branch). Append:
+
+```
+The diff is at: {DIFF_PATH}
+Repo root: {REPO_ROOT}
+
+Read the diff to identify Rust files. Read the full files and related
+type/trait/error definitions. Produce your inspection report. If no Rust
+files are in the diff, say so and stop.
+```
+
+Write output to `$out_dir/raw-rust-inspector.md`.
+
+**Skip conditions**: If the diff contains no test files, the test inspector
+will self-exit (this is fine — record "no test files, skipped"). If the
+diff contains no `.rs` files, the Rust inspector will self-exit (same
+handling). The aggregator handles missing inspector reports gracefully.
 
 ### Reviewers 4-5 — Codex gpt-5.5 A and B (Bash)
 
@@ -350,6 +398,8 @@ In a single Claude message, issue:
 3. `Agent` call for Sonnet
 4. `Bash` call for Codex gpt-5.5 A (`run_in_background: true`, `timeout: 600000`)
 5. `Bash` call for Codex gpt-5.5 B (`run_in_background: true`, `timeout: 600000`)
+6. `Agent` call for Test Inspector (`model: "sonnet"`)
+7. `Agent` call for Idiomatic Rust Inspector (`model: "opus"`)
 
 ## 6. Aggregate
 
@@ -369,6 +419,11 @@ You have five raw reviews:
 - {SONNET_PATH}    (Claude Sonnet)
 - {CODEX_A_PATH}   (Codex gpt-5.5 A)
 - {CODEX_B_PATH}   (Codex gpt-5.5 B)
+
+You also have two specialized inspector reports (may be empty if no
+relevant files were in the diff):
+- {TEST_INSPECTOR_PATH}    (Test Inspector — test quality assessment)
+- {RUST_INSPECTOR_PATH}    (Idiomatic Rust Inspector — Rust idiom assessment)
 
 And the diff itself at:
 - {DIFF_PATH}
@@ -448,6 +503,25 @@ which reviewer raised it>
 <2-3 paragraphs. Your own senior-engineer judgment on whether this PR is
 ready to merge, needs a second pass, or has fundamental issues. Call out
 anything the individual reviewers missed collectively if you spot it.>
+
+Inspector reports use a different format from the five reviewers. Integrate
+their findings as follows:
+
+- **Test Inspector findings** (useless/weak tests, missing coverage, mock
+  abuse): convert each into a standard finding entry. Use category "tests".
+  Severity: useless tests = medium, weak tests = low, missing coverage for
+  risky logic = high, mock abuse = medium.
+- **Idiomatic Rust Inspector findings** (non-idiomatic code, ownership
+  issues, error handling, type design): convert each into a standard
+  finding entry. Use category "maintainability" for style/idiom issues,
+  "correctness" for ownership bugs or unsafe misuse. Severity: non-idiomatic
+  with correctness impact = high, non-idiomatic style-only = medium,
+  suboptimal = low.
+- If an inspector report is empty or says "no files found", ignore it.
+- Inspector findings can corroborate or conflict with the five reviewer
+  findings — merge duplicates as you would between any two reviewers.
+- In the "Found by" field, use [test-inspector] or [rust-inspector] as
+  the attribution.
 
 Do not include emojis, apologies, or disclaimers. Be decisive.
 ```

@@ -250,15 +250,17 @@ there interactions between components that could produce surprising
 behavior? Are there implicit assumptions that aren't documented?
 ```
 
-## 6a. Spawn five reviewers in parallel
+## 6a. Spawn reviewers and inspectors in parallel
 
-Spawn all five in a **single message with five parallel tool calls**:
+Spawn all in a **single message with parallel tool calls**:
 
 1. **Claude Opus A** — via the `Agent` tool (`model: "opus"`)
 2. **Claude Opus B** — via the `Agent` tool (`model: "opus"`)
 3. **Claude Sonnet** — via the `Agent` tool (`model: "sonnet"`)
 4. **Codex gpt-5.5 A** — via `Bash` (`run_in_background: true`, `timeout: 600000`)
 5. **Codex gpt-5.5 B** — via `Bash` (`run_in_background: true`, `timeout: 600000`)
+6. **Test Inspector** — via the `Agent` tool (`model: "sonnet"`)
+7. **Idiomatic Rust Inspector** — via the `Agent` tool (`model: "opus"`)
 
 ### Reviewers 1-3 — Claude Opus A, Opus B, Sonnet (Agent tool)
 
@@ -319,6 +321,55 @@ Notes:
 - **Daily quota fallback**: If Codex fails with a daily limit error (look
   for `rate_limit` or `quota` with reset in hours), retry once with `-m o3`.
 
+### Inspectors 6-7 — Test Inspector and Idiomatic Rust Inspector (Agent tool)
+
+Spawn two additional specialized inspector agents alongside the five
+reviewers. These produce structured reports in their own format (not the
+reviewer finding format) and feed into the aggregator as supplementary input.
+
+**Test Inspector** — `model: "sonnet"`, `subagent_type: "general-purpose"`:
+
+Prompt: the full content of the `/test-inspector` command skill
+(`~/Github/dotclaude/commands/test-inspector.md`, everything below the
+frontmatter). Replace `$ARGUMENTS` with the PR reference. Append:
+
+```
+The diff is at: {DIFF_PATH}
+Repo root: {REPO_ROOT}
+The PR is at commit <head_sha>. Read source files via
+`git show <head_sha>:<path>` — the working tree does not match the PR.
+
+Read the diff to identify test files. Read the full test files and the
+source files they test. Produce your inspection report. If no test files
+are in the diff, say so and stop.
+```
+
+Write output to `$out_dir/raw-test-inspector.md`.
+
+**Idiomatic Rust Inspector** — `model: "opus"`, `subagent_type: "general-purpose"`:
+
+Prompt: the full content of the `/idiomatic-rust-inspector` command skill
+(`~/Github/dotclaude/commands/idiomatic-rust-inspector.md`, everything
+below the frontmatter). Replace `$ARGUMENTS` with the PR reference. Append:
+
+```
+The diff is at: {DIFF_PATH}
+Repo root: {REPO_ROOT}
+The PR is at commit <head_sha>. Read source files via
+`git show <head_sha>:<path>` — the working tree does not match the PR.
+
+Read the diff to identify Rust files. Read the full files and related
+type/trait/error definitions. Produce your inspection report. If no Rust
+files are in the diff, say so and stop.
+```
+
+Write output to `$out_dir/raw-rust-inspector.md`.
+
+**Skip conditions**: If the diff contains no test files, the test inspector
+will self-exit (record "no test files, skipped"). If the diff contains no
+`.rs` files, the Rust inspector will self-exit (same handling). The
+aggregator handles missing inspector reports gracefully.
+
 ### Output validation
 
 After all five finish, validate each output file:
@@ -343,6 +394,27 @@ continue. If all five error, stop.
   reviewers is still valuable.
 
 ## 7. Aggregate with review-pr-specific output
+
+The aggregator receives the five reviewer reports **plus** the two
+inspector reports (`$out_dir/raw-test-inspector.md` and
+`$out_dir/raw-rust-inspector.md`). Pass all seven to the aggregator.
+
+Inspector reports use a different format from the five reviewers. The
+aggregator should integrate their findings as follows:
+
+- **Test Inspector findings** (useless/weak tests, missing coverage, mock
+  abuse): convert each into a standard finding entry. Use category "tests".
+  Severity: useless tests = medium, weak tests = low, missing coverage for
+  risky logic = high, mock abuse = medium.
+- **Idiomatic Rust Inspector findings** (non-idiomatic code, ownership
+  issues, error handling, type design): convert each into a standard
+  finding entry. Use category "maintainability" for style/idiom issues,
+  "correctness" for ownership bugs or unsafe misuse. Severity: non-idiomatic
+  with correctness impact = high, non-idiomatic style-only = medium,
+  suboptimal = low.
+- If an inspector report is empty or says "no files found", ignore it.
+- Inspector findings can corroborate or conflict with the five reviewer
+  findings — merge duplicates as usual.
 
 The aggregator produces `$out_dir/review.md` with the following
 adaptations for PR review context:
