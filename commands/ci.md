@@ -1,11 +1,11 @@
 ---
-allowed-tools: Bash(nix:*), Bash(cargo:*), Bash(git:*), Bash(gt:*), Bash(mktemp:*), Bash(rm:*), Bash(cat:*), Bash(grep:*), Bash(tail:*), Bash(wc:*), Bash(test:*), Read, Edit, Write, Grep, Glob, TodoWrite
-description: Run the repo's `nix run .#ci` task and fix every issue it reports, iterating until the task passes clean. Final verification only — run after substantive work is done.
+allowed-tools: Bash(nix:*), Bash(cargo:*), Bash(git:*), Bash(gt:*), Bash(mktemp:*), Bash(rm:*), Bash(cat:*), Bash(grep:*), Bash(tail:*), Bash(wc:*), Bash(test:*), Bash(cd:*), Bash(bun:*), Read, Edit, Write, Grep, Glob, TodoWrite
+description: Run CI steps individually (check, test, clippy, fmt, dashboard) and fix every issue, iterating until all pass clean. Final verification only — run after substantive work is done.
 argument-hint: "[upstack]"
 ---
 
-Run the project's `ci` nix flake task and fix every issue it reports. Loop
-until `nix run .#ci` exits zero.
+Run the project's CI steps individually and fix every issue they report.
+Loop until all steps pass.
 
 ## Upstack mode
 
@@ -44,64 +44,90 @@ branch — the user drives version control. Fixes are left as uncommitted
 changes on whichever branch they belong to.
 
 This command is the **final verification pass**. Run it when you believe your
-work is done. It covers the full workspace (`cargo check`, `cargo clippy`,
-`cargo nextest`, `cargo fmt --check` — whatever the flake's `ci` task wraps).
+work is done. It covers the full workspace: cargo check, nextest, clippy,
+fmt, and dashboard lint/check — each as individual steps.
 
 ## 1. Preflight
 
-**Always use `nix run .#ci`** — never decompose it into individual cargo
-commands, even when already inside a nix dev shell. The flake task is the
-single source of truth for what CI runs and in what order.
+### Why individual steps, not `nix run .#ci`
 
-### Verify the flake exposes a `ci` task
+**CRITICAL: Do NOT call `nix run .#ci` as a single monolithic command.**
+The flake's CI task runs all steps in one shell with `set -euxo pipefail`,
+which means:
+- If step 3 (tests) fails, you must re-run steps 1-2 (check) again on
+  the next iteration even though they already passed.
+- A full CI run takes 10+ minutes; re-running passed steps wastes time.
+- If something holds a cargo build directory lock, the entire run blocks.
+
+Instead, run each CI step as a **separate command** via
+`nix develop .#ci-backend -c <command>`. This way:
+- When a step fails, fix the issue and re-run **only that step**.
+- Once a step passes, skip it on subsequent iterations.
+- No wasted time re-running passed steps.
+
+### Verify the ci-backend dev shell exists
 
 ```bash
-nix eval .#ci --apply 'x: "ok"' 2>/dev/null || nix flake show --json 2>/dev/null | grep -q '"ci"'
+nix eval .#devShells.$(nix eval --impure --expr builtins.currentSystem --raw).ci-backend --apply 'x: "ok"' 2>/dev/null
 ```
 
-If `ci` doesn't exist in this flake:
-- Fall back to reading `flake.nix` to see what tasks *do* exist.
-- Tell the user: "`nix run .#ci` is not defined in this flake. Available tasks: <list>. Which one should I run, or should I use `cargo check + clippy + nextest + fmt` directly?"
-- Wait for their direction. Do not guess.
+If it doesn't exist, fall back to reading `flake.nix` to find the correct
+dev shell name. Ask the user if unclear.
 
-If the working tree is dirty, print a `git status --short` summary so the user
-knows their uncommitted work is in play. Do not stash or clean — the user may
-be actively working.
+If the working tree is dirty, print a `git status --short` summary so the
+user knows their uncommitted work is in play. Do not stash or clean — the
+user may be actively working.
 
 ## 2. Initialize the fix loop
 
-Create a TodoWrite list with:
+**CRITICAL: Run all CI commands directly in the main agent context.** Do
+NOT delegate CI to a subagent or Agent tool call. The main agent must see
+the full output, fix issues, and re-run — delegating loses context and
+forces redundant work.
 
-1. "Run `nix run .#ci`" — in_progress
-2. "Fix issues from iteration 1" — pending
-3. "Re-run `nix run .#ci` to confirm clean" — pending
+The CI pipeline has these ordered steps. Run them **one at a time**,
+in order:
 
-Set a max iteration cap of **8**. Track iteration count. If you hit the cap
-without convergence, stop and ask the user — you are probably fighting
-yourself and need a human to untangle it.
+| Step | Command | Shell |
+|------|---------|-------|
+| 1 | `cargo check --workspace` | `nix develop .#ci-backend -c` |
+| 2 | `cargo check --workspace --all-features` | `nix develop .#ci-backend -c` |
+| 3 | `cargo nextest run --workspace --all-features` | `nix develop .#ci-backend -c` |
+| 4 | `cargo clippy --workspace --all-targets --all-features` | `nix develop .#ci-backend -c` |
+| 5 | `cargo fmt -- --check` | `nix develop .#ci-backend -c` |
+| 6 | `nix run .#genBunNix` | direct |
+| 7 | `nix fmt -- dashboard/bun.nix` | direct |
+| 8 | `nix run .#st0x-dto -- dashboard/src/lib/api` | direct |
+| 9 | `cd dashboard && bun install --frozen-lockfile && bun run lint && bun run check` | `nix develop .#ci-dashboard -c bash -c` |
 
-## 3. Run the task
+Track which steps have passed. Set a max fix-loop iteration cap of **8**
+per step. If you hit the cap on any step, stop and ask the user.
+
+## 3. Run the steps
+
+Run each step sequentially. For each step:
 
 ```bash
-log=$(mktemp -t ci-run.XXXXXX.log)
-nix run .#ci 2>&1 | tee "$log"
-exit_code=${PIPESTATUS[0]}
+nix develop .#ci-backend -c cargo check --workspace 2>&1
 ```
 
-Use a long timeout (`timeout: 600000` — 10 minutes minimum). Some of these
-runs take a while.
+Use `timeout: 600000` (10 minutes) for each command. Some steps (especially
+nextest) take a while.
 
-If `exit_code == 0`:
-- Print "✓ `nix run .#ci` passed clean" and the tail of the log.
-- Mark all todos complete.
-- Delete the tempfile.
-- Stop. Do not commit, do not push, do not run anything else. The user
-  drives version control.
+**If the step passes (exit 0):**
+- Print "✓ Step N passed: `<command>`"
+- Move to the next step.
 
-If `exit_code != 0`:
-- Read the full log. Do not truncate — errors often scroll past the visible
-  tail, especially when multiple cargo steps fail in sequence.
-- Proceed to step 4.
+**If the step fails (exit != 0):**
+- Read the full output. Do not truncate.
+- Proceed to step 4 (parse and fix).
+- After fixing, **re-run only the failed step** — do not re-run steps
+  that already passed.
+- Once the step passes, continue to the next step.
+
+**If all steps pass:**
+- Print the summary and stop. Do not commit, push, or run anything else.
+  The user drives version control.
 
 ## 4. Parse the failure
 
@@ -113,6 +139,7 @@ standard st0x-style ci task, that's (in order):
 3. `cargo nextest run --workspace --all-features`
 4. `cargo clippy --workspace --all-targets --all-features`
 5. `cargo fmt -- --check`
+6. `(cd dashboard && bun install && bun run lint && bun run check)`
 
 Identify which step failed first. `set -euxo pipefail` in the task means the
 first non-zero exit stops everything, so there's exactly one "primary" step
@@ -200,6 +227,11 @@ work around the rule. Rules exist for reasons.
   gate matching its callers. Often `#[cfg(feature = "...")]` is missing
   above an item or an `use` line.
 - **`fmt --check` failing**: run `cargo fmt` (without `--check`), done.
+- **Dashboard `bun run lint` failing**: ESLint errors in `dashboard/` —
+  read the flagged file, fix the TypeScript/Svelte issue. Common: stringifying
+  objects (`@typescript-eslint/no-base-to-string`), unused vars, type errors.
+- **Dashboard `bun run check` failing**: `svelte-check` type errors in
+  `dashboard/` — fix the TypeScript types in the flagged Svelte components.
 
 ### Editing
 
@@ -210,26 +242,24 @@ cleanups.
 After applying fixes, mark the relevant todo items complete and move to
 step 6.
 
-## 6. Re-run the task
+## 6. Re-run the failed step
 
-Re-run CI with a fresh log file:
+After applying fixes, re-run **only the step that failed** — not the
+entire pipeline. Steps that already passed do not need to be re-run.
 
 ```bash
-log=$(mktemp -t ci-run.XXXXXX.log)
-nix run .#ci 2>&1 | tee "$log"
-exit_code=${PIPESTATUS[0]}
+nix develop .#ci-backend -c cargo clippy --workspace --all-targets --all-features 2>&1
 ```
 
-If `exit_code == 0`:
-- Same success path as step 3.
+If the step passes now, continue to the next step in the pipeline.
 
-If `exit_code != 0`:
-- Increment iteration count.
-- If iteration count ≥ 8, stop and ask the user. Summarize:
+If the step still fails:
+- Increment the fix-loop iteration count for this step.
+- If iteration count >= 8, stop and ask the user. Summarize:
   - What you've fixed so far.
   - What keeps failing.
   - Your best theory on why you're stuck.
-- Otherwise, loop back to step 4 with the new log.
+- Otherwise, loop back to step 4 with the new output.
 
 **Important**: on each re-run, diff the failures against the previous
 iteration. If the same error persists unchanged, your fix didn't work —
@@ -238,18 +268,32 @@ file/line/message), that's progress, keep going. If a new error appeared
 that didn't exist before, your fix introduced a regression — back up
 and try a different approach.
 
+**Exception — when to re-run earlier steps**: If your fix changed code
+that could affect compilation (not just formatting or lint suppression),
+re-run from `cargo check` forward to catch regressions. Use judgment:
+a `cargo fmt` fix never needs a re-check, but adding a new function
+parameter does.
+
 ## 7. On success
 
-When `nix run .#ci` passes:
+When all steps pass:
 
 1. Run a quick self-check: print a summary of every file you modified in
    this command's fix loop.
-2. Print the tail of the final (successful) log as proof.
-3. Delete the tempfiles.
-4. Tell the user: "`nix run .#ci` is clean across <N> iterations. I
-   modified <M> files. Let me know if you want me to amend / commit / push
-   via `gt` — I won't do that automatically."
-5. Stop.
+2. Print a step-by-step summary:
+   ```
+   CI passed clean:
+     ✓ cargo check --workspace
+     ✓ cargo check --workspace --all-features
+     ✓ cargo nextest run --workspace --all-features
+     ✓ cargo clippy --workspace --all-targets --all-features
+     ✓ cargo fmt -- --check
+     ✓ dashboard (lint + check)
+   ```
+3. Tell the user: "CI is clean. I modified <M> files. Let me know if you
+   want me to amend / commit / push via `gt` — I won't do that
+   automatically."
+4. Stop.
 
 ## 8. On failure to converge
 
@@ -270,9 +314,9 @@ Do not keep looping silently.
 
 ## Failure modes
 
-- **`nix run .#ci` takes >10 min**: increase the bash timeout to 20 or 30
-  min. Don't kill the run — partial state makes debugging harder.
-- **The first run fails because of environment issues** (missing tools,
+- **A step takes >10 min**: increase the bash timeout to 20 or 30 min.
+  Don't kill the run — partial state makes debugging harder.
+- **The first step fails because of environment issues** (missing tools,
   network, nix cache): report it, stop, and tell the user — these are not
   fixable by code edits.
 - **Tests fail flakily** (pass on re-run without changes): flag it
@@ -283,6 +327,9 @@ Do not keep looping silently.
   project docs usually say to run `sqlx db reset -y`. Check the project
   docs and run whatever recovery command they prescribe before calling
   the fix impossible.
+- **Build directory lock**: If a cargo command blocks on "waiting for file
+  lock on build directory", another cargo process is running. Wait for it
+  to finish — do NOT kill processes, as you may kill the wrong one.
 
 ## Hard rules
 
