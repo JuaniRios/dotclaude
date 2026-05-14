@@ -85,21 +85,30 @@ NOT delegate CI to a subagent or Agent tool call. The main agent must see
 the full output, fix issues, and re-run — delegating loses context and
 forces redundant work.
 
-The CI pipeline has these ordered steps. Run them **one at a time**,
-in order:
+The CI pipeline has these steps in two parallel tracks:
 
-| Step | Command | Shell |
-|------|---------|-------|
-| 1 | `nixfmt --check` on all `*.nix` files | direct (see below) |
-| 2 | `cargo check --workspace` | `nix develop .#ci-backend -c` |
-| 3 | `cargo check --workspace --all-features` | `nix develop .#ci-backend -c` |
-| 4 | `cargo nextest run --workspace --all-features` | `nix develop .#ci-backend -c` |
-| 5 | `cargo clippy --workspace --all-targets --all-features` | `nix develop .#ci-backend -c` |
-| 6 | `cargo fmt -- --check` | `nix develop .#ci-backend -c` |
-| 7 | `nix run .#genBunNix` | direct |
-| 8 | `nix fmt -- dashboard/bun.nix` | direct |
-| 9 | `nix run .#st0x-dto -- dashboard/src/lib/api` | direct |
-| 10 | `cd dashboard && bun install --frozen-lockfile && bun run lint && bun run check` | `nix develop .#ci-dashboard -c bash -c` |
+**Backend track** (sequential — each depends on the prior):
+
+| Step | Command | Shell | Timeout |
+|------|---------|-------|---------|
+| 1 | `nixfmt --check` on all `*.nix` files | direct | 60s |
+| 2 | `cargo check --workspace` | `nix develop .#ci-backend -c` | 600s |
+| 3 | `cargo check --workspace --all-features` | `nix develop .#ci-backend -c` | 600s |
+| 4 | `cargo nextest run --workspace --all-features` | `nix develop .#ci-backend -c` | 600s |
+| 5 | `cargo clippy --workspace --all-targets --all-features` | `nix develop .#ci-backend -c` | 600s |
+| 6 | `cargo fmt -- --check` | `nix develop .#ci-backend -c` | 60s |
+
+**Dashboard track** (independent of backend — start alongside step 2):
+
+| Step | Command | Shell | Timeout |
+|------|---------|-------|---------|
+| 7 | `nix run .#genBunNix` | direct | 120s |
+| 8 | `nix fmt -- dashboard/bun.nix` | direct | 60s |
+| 9 | `nix run .#st0x-dto -- dashboard/src/lib/api` | direct | 120s |
+| 10 | `cd dashboard && bun install --frozen-lockfile && bun run lint && bun run check` | `nix develop .#ci-dashboard -c bash -c` | 300s |
+
+Steps 7, 8, and 9 can run in parallel with each other. Step 10 must wait
+for step 9 to complete (it depends on generated DTO bindings).
 
 ### Step 1: nixfmt check
 
@@ -123,14 +132,52 @@ per step. If you hit the cap on any step, stop and ask the user.
 
 ## 3. Run the steps
 
-Run each step sequentially. For each step:
+### Parallelism strategy
+
+The steps form two independent tracks that can run **in parallel**:
+
+- **Backend track** (steps 1–6): Must be sequential within this track
+  because each step depends on the prior one passing (no point running
+  tests if check fails).
+- **Dashboard track** (steps 7–10): Completely independent of the backend
+  track. These can start immediately alongside step 1.
+
+**Execution plan:**
+
+1. Launch **step 1** (nixfmt) — fast, ~150ms, run it first in both tracks.
+2. After nixfmt passes, launch **steps 2–6 sequentially** (backend) and
+   **steps 7–10 in parallel** (dashboard). Use separate Bash tool calls
+   in a single message to run them concurrently.
+3. Within the dashboard track, steps 7–9 are independent of each other
+   and can run in parallel. Step 10 (bun lint+check) depends on step 9
+   (dto codegen) completing first.
+
+**If no fixes are needed** (common case — this is a verification pass),
+parallelism cuts wall-clock time roughly in half.
+
+**If fixes are needed**, fix the failing step, re-run only that step, and
+continue. Steps that already passed do not need re-running.
+
+### Timeout handling
+
+**CRITICAL: Use `timeout: 600000` (10 minutes) on ALL `nix develop` and
+`nix run` commands.** Many steps (nextest, clippy, cargo check) routinely
+take 2–10 minutes. The default 120s timeout will cause the Bash tool to
+auto-background the command, which breaks the sequential flow and forces
+messy polling loops.
 
 ```bash
+# Example — always set timeout
 nix develop .#ci-backend -c cargo check --workspace 2>&1
+# ^ with timeout: 600000 on the Bash tool call
 ```
 
-Use `timeout: 600000` (10 minutes) for each command. Some steps (especially
-nextest) take a while.
+**NEVER use `run_in_background: true`** for CI steps. The agent needs to
+see the output immediately to decide whether to fix or continue. If a
+command genuinely takes >10 minutes, increase timeout to `900000` (15 min)
+rather than backgrounding it.
+
+### Per-step behavior
 
 **If the step passes (exit 0):**
 - Print "✓ Step N passed: `<command>`"
@@ -333,8 +380,10 @@ Do not keep looping silently.
 
 ## Failure modes
 
-- **A step takes >10 min**: increase the bash timeout to 20 or 30 min.
-  Don't kill the run — partial state makes debugging harder.
+- **A step takes >10 min**: increase the Bash `timeout` parameter to
+  `900000` (15 min). Don't kill the run — partial state makes debugging
+  harder. **Never use `run_in_background`** as a workaround for slow
+  commands — increase the timeout instead.
 - **The first step fails because of environment issues** (missing tools,
   network, nix cache): report it, stop, and tell the user — these are not
   fixable by code edits.
