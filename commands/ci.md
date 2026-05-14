@@ -1,47 +1,44 @@
 ---
-allowed-tools: Bash(nix:*), Bash(cargo:*), Bash(git:*), Bash(gt:*), Bash(mktemp:*), Bash(rm:*), Bash(cat:*), Bash(grep:*), Bash(tail:*), Bash(wc:*), Bash(test:*), Bash(cd:*), Bash(bun:*), Bash(nixfmt:*), Bash(find:*), Read, Edit, Write, Grep, Glob, TodoWrite
+allowed-tools: Bash(nix:*), Bash(cargo:*), Bash(git:*), Bash(gt:*), Bash(mktemp:*), Bash(rm:*), Bash(cat:*), Bash(grep:*), Bash(tail:*), Bash(wc:*), Bash(test:*), Bash(cd:*), Bash(bun:*), Bash(nixfmt:*), Bash(find:*), Read, Edit, Write, Grep, Glob, TodoWrite, Skill
 description: Run CI steps individually (check, test, clippy, fmt, dashboard) and fix every issue, iterating until all pass clean. Final verification only — run after substantive work is done.
-argument-hint: "[upstack]"
+argument-hint: "[stack]"
 ---
 
 Run the project's CI steps individually and fix every issue they report.
 Loop until all steps pass.
 
-## Upstack mode
+## Stack mode
 
-When invoked as `/ci upstack`, run CI on the **entire upstack** — the
-current branch and every branch above it in the Graphite stack.
+When invoked as `/ci stack`, run CI on the **entire upstack** — the
+current branch and every branch above it in the Graphite stack,
+amending each branch's commit as you go.
 
-### Upstack flow
+### Stack flow
 
 1. Record the starting branch: `git branch --show-current`.
 2. Run the normal `/ci` flow (sections 1–8 below) on the current branch.
-3. If CI passes (or was already clean), attempt to move up:
-   ```bash
-   gt up
-   ```
+3. After CI passes, if any files were modified during the fix loop, use
+   `/graphite` to amend the changes into the current branch's commit
+   via `gt modify -a`. If no files were modified, skip this step.
+4. Attempt to move up the stack. Use `/graphite` to run `gt up`.
    - If `gt up` succeeds (exits 0 and the branch changed), you're on the
      next branch in the stack. Print:
-     `"Moving up stack → <new branch name>"` and repeat from step 2.
+     `"Moving up stack -> <new branch name>"` and repeat from step 2.
    - If `gt up` fails or the branch didn't change, you've reached the top
      of the stack. Print:
-     `"✓ Reached top of stack. CI passed on all branches."` and stop.
-4. If CI **fails to converge** on any branch (hits the iteration cap),
+     `"Reached top of stack. CI passed on all branches."` and stop.
+5. If CI **fails to converge** on any branch (hits the iteration cap),
    stop on that branch. Do NOT continue up the stack — report which
    branch is stuck and follow the normal failure-to-converge flow
    (section 8).
-5. When done (success or failure), print a summary of all branches
+6. When done (success or failure), print a summary of all branches
    visited and their CI result:
    ```
-   Upstack CI summary:
+   Stack CI summary:
      branch-a: ✓ clean
-     branch-b: ✓ clean (fixed 2 issues)
+     branch-b: ✓ clean (fixed 2 issues, amended)
      branch-c: ✗ stuck (clippy lint — see above)
    ```
-
-**Hard rule for upstack mode**: Never commit, amend, or push on any
-branch — the user drives version control. Fixes are left as uncommitted
-changes on whichever branch they belong to.
 
 This command is the **final verification pass**. Run it when you believe your
 work is done. It covers the full workspace: cargo check, nextest, clippy,
@@ -356,10 +353,11 @@ When all steps pass:
      ✓ cargo fmt -- --check
      ✓ dashboard (lint + check)
    ```
-3. Tell the user: "CI is clean. I modified <M> files. Let me know if you
-   want me to amend / commit / push via `gt` — I won't do that
-   automatically."
-4. Stop.
+3. **If any files were modified** during the fix loop, use `/graphite` to
+   amend the changes into the current commit via `gt modify -a`. This
+   keeps CI fixes bundled with the work they belong to.
+4. **If no files were modified**, CI was already clean — nothing to amend.
+5. Stop.
 
 ## 8. On failure to converge
 
@@ -404,7 +402,8 @@ Do not keep looping silently.
 1. Never suppress a lint (`#[allow(...)]`, `#![allow(...)]`) without
    explicit user permission.
 2. Never delete, skip, or `#[ignore]` a test to make CI pass.
-3. Never commit, amend, or push — the user drives version control.
+3. Never push — the user drives pushes. Amending via `gt modify -a` is
+   allowed (and expected) when CI fixes were applied.
 4. Never make unrelated changes while fixing — no drive-by cleanups.
 5. Never hand-edit whitespace; run `cargo fmt` for formatting.
 6. Cap at 8 iterations; stop and ask the user if you don't converge.
