@@ -1,5 +1,5 @@
 ---
-allowed-tools: Bash(staging-status:*), Bash(prod-status:*), Bash(sqlite3:*), Bash(ls:*), Bash(find:*), Bash(wc:*), Bash(tail:*), Bash(head:*), Read, Grep, Glob
+allowed-tools: Bash(staging-status:*), Bash(prod-status:*), Bash(staging-remote:*), Bash(prod-remote:*), Bash(sqlite3:*), Bash(ls:*), Bash(find:*), Bash(wc:*), Bash(tail:*), Bash(head:*), Read, Grep, Glob
 description: Run `staging-status` or `prod-status`, read downloaded logs/DB/trades, and diagnose whether the liquidity bot is healthy — hedging, rebalancing, errors, and overall status.
 argument-hint: <prod|staging>
 ---
@@ -222,6 +222,43 @@ Be direct. If everything is healthy, say so in 3-4 lines. Don't pad. If there
 are problems, lead with the worst ones and be specific about what's wrong and
 what to do.
 
+## 5. Follow-up diagnostic queries
+
+After the initial report, **do not re-run `prod-status` / `staging-status` for
+follow-up questions** -- each invocation re-downloads the ~100MB DB and full
+logs, which is slow and wasteful. The downloaded snapshot is also frozen in
+time; for "what is the bot doing right now?" questions you want live data.
+
+Instead, use the lightweight remote SSH shims:
+
+- `prod-remote <command>` -- SSH into prod and run `<command>` directly
+- `staging-remote <command>` -- same, for staging
+
+These exec any command on the server, so you can query live state without
+re-downloading. The live DB lives at `/mnt/data/st0x-hedge.db` and logs come
+from `journalctl -u st0x-hedge`. Common patterns:
+
+```bash
+# Tail recent logs (filter at source, only pull what you need)
+prod-remote journalctl -u st0x-hedge -n 200 --no-pager
+prod-remote "journalctl -u st0x-hedge --since '30 min ago' --no-pager | grep -i rebalance"
+
+# Query the live DB directly without downloading
+prod-remote sqlite3 /mnt/data/st0x-hedge.db "SELECT * FROM position_view;"
+prod-remote sqlite3 /mnt/data/st0x-hedge.db "SELECT view_id, status FROM offchain_order_view ORDER BY rowid DESC LIMIT 20;"
+
+# Service status
+prod-remote systemctl status st0x-hedge
+```
+
+When to fall back to a full `prod-status` / `staging-status` rerun:
+
+- The user explicitly asks for a full refresh.
+- You need fresh Raindex order JSON or per-order trade CSVs (those only come
+  from the full status download, not from the server-side DB).
+- The remote commands aren't reachable (Tailscale down, SSH broken) and you
+  need to verify the snapshot script works at all.
+
 ## Hard rules
 
 1. Never modify any files -- this is a read-only diagnostic command.
@@ -234,6 +271,10 @@ what to do.
 6. Report findings honestly -- don't minimize issues or speculate beyond what
    the data shows.
 7. Never use `Read` on the `.db` file -- always use `sqlite3` queries.
+8. Never re-run `prod-status` / `staging-status` for follow-up questions after
+   the initial report. Use `prod-remote` / `staging-remote` for live queries.
+   Only refetch the full snapshot when the user explicitly asks, or when you
+   need data the remote shims can't get (e.g. fresh Raindex order JSON).
 
 ## Failure modes
 
