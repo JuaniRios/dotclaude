@@ -256,9 +256,9 @@ specified above — nothing else.
 Write each Agent's output to `$out_dir/raw-opus-a.md`,
 `$out_dir/raw-opus-b.md`, and `$out_dir/raw-sonnet.md` respectively.
 
-### Inspector agents — Test Inspector and Idiomatic Rust Inspector
+### Inspector agents — Test, Idiomatic Rust, and Strong Typing Inspectors
 
-Alongside the five reviewers, spawn two additional specialized inspector
+Alongside the five reviewers, spawn three additional specialized inspector
 agents. These produce structured reports in their own format (not the
 reviewer finding format) and feed into the aggregator as supplementary
 input.
@@ -299,10 +299,30 @@ files are in the diff, say so and stop.
 
 Write output to `$out_dir/raw-rust-inspector.md`.
 
+**Strong Typing Inspector** — `model: "sonnet"`, `subagent_type: "general-purpose"`:
+
+Prompt: the full content of the `/strong-typing-inspector` command skill
+(`~/Github/dotclaude/commands/strong-typing-inspector.md`, everything
+below the frontmatter). Replace `$ARGUMENTS` with the empty string (use
+the current branch). Append:
+
+```
+The diff is at: {DIFF_PATH}
+Repo root: {REPO_ROOT}
+
+Build the domain-type inventory from the repo first, then scan the diff.
+Produce your inspection report. If the diff has no source files where
+strong typing is relevant, say so and stop.
+```
+
+Write output to `$out_dir/raw-typing-inspector.md`.
+
 **Skip conditions**: If the diff contains no test files, the test inspector
 will self-exit (this is fine — record "no test files, skipped"). If the
 diff contains no `.rs` files, the Rust inspector will self-exit (same
-handling). The aggregator handles missing inspector reports gracefully.
+handling). If the diff has no source files where strong typing applies,
+the typing inspector will self-exit (same handling). The aggregator
+handles missing inspector reports gracefully.
 
 ### Reviewers 4-5 — Codex gpt-5.5 A and B (Bash)
 
@@ -400,6 +420,7 @@ In a single Claude message, issue:
 5. `Bash` call for Codex gpt-5.5 B (`run_in_background: true`, `timeout: 600000`)
 6. `Agent` call for Test Inspector (`model: "sonnet"`)
 7. `Agent` call for Idiomatic Rust Inspector (`model: "opus"`)
+8. `Agent` call for Strong Typing Inspector (`model: "sonnet"`)
 
 ## 6. Aggregate
 
@@ -420,10 +441,11 @@ You have five raw reviews:
 - {CODEX_A_PATH}   (Codex gpt-5.5 A)
 - {CODEX_B_PATH}   (Codex gpt-5.5 B)
 
-You also have two specialized inspector reports (may be empty if no
+You also have three specialized inspector reports (may be empty if no
 relevant files were in the diff):
 - {TEST_INSPECTOR_PATH}    (Test Inspector — test quality assessment)
 - {RUST_INSPECTOR_PATH}    (Idiomatic Rust Inspector — Rust idiom assessment)
+- {TYPING_INSPECTOR_PATH}  (Strong Typing Inspector — primitive-vs-domain-type assessment)
 
 And the diff itself at:
 - {DIFF_PATH}
@@ -517,11 +539,16 @@ their findings as follows:
   "correctness" for ownership bugs or unsafe misuse. Severity: non-idiomatic
   with correctness impact = high, non-idiomatic style-only = medium,
   suboptimal = low.
+- **Strong Typing Inspector findings** (primitive used where domain type
+  exists, missed newtype opportunity): convert each into a standard finding
+  entry. Use category "maintainability". Severity: primitive-where-domain-
+  type-exists = medium (high if it touches financial values or
+  identifiers), missed-newtype opportunity = low.
 - If an inspector report is empty or says "no files found", ignore it.
 - Inspector findings can corroborate or conflict with the five reviewer
   findings — merge duplicates as you would between any two reviewers.
-- In the "Found by" field, use [test-inspector] or [rust-inspector] as
-  the attribution.
+- In the "Found by" field, use [test-inspector], [rust-inspector], or
+  [typing-inspector] as the attribution.
 
 Do not include emojis, apologies, or disclaimers. Be decisive.
 ```
