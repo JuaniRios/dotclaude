@@ -1,6 +1,6 @@
 ---
 name: progress-tracking
-description: "Use when the user asks to run the former Claude /progress-tracking workflow: Gather progress on a project (e.g. hedge-bot) from Linear issues, GitHub PRs, and git history since the last run or a custom time range. Outputs an investor-facing summary and saves it to disk."
+description: "Use when the user asks to run the former Claude /progress-tracking workflow: Gather progress on a project (hedge-bot or issuance-bot) from Linear issues, GitHub PRs, and git history since the last run or a custom time range. Outputs an investor-facing summary and saves it to disk."
 ---
 
 # progress-tracking
@@ -26,22 +26,27 @@ The argument is: `<project> [since <timeframe>]`
 
 Examples:
 - `hedge-bot` — since last run
+- `issuance-bot` — since last run
 - `hedge-bot since last week` — override: last 7 days
-- `hedge-bot since last 10 days` — override: last 10 days
+- `issuance-bot since last 10 days` — override: last 10 days
 - `hedge-bot since 2026-04-01` — override: specific date
 
 Extract:
-1. **Project name** — the first word (e.g., `hedge-bot`)
+1. **Project name** — the first word (e.g., `hedge-bot` or `issuance-bot`)
 2. **Time override** — everything after `since` (optional)
 
-If no project name is provided, default to `hedge-bot`.
+If no project name is provided, default to `hedge-bot`. The two configured
+projects are `hedge-bot` (the liquidity bot, `st0x.liquidity`) and
+`issuance-bot` (the Alpaca ITN issuer, `st0x.issuance`). Both live in the same
+Linear team (RAI), so relevance filtering (Step 5) matters — issues for one
+bot routinely show up when querying the other.
 
 ## Step 2 — Load config and determine date range
 
 Read the config file:
 
 ```bash
-cat ~/Github/dotclaude/data/progress-tracking.json
+cat ~/Github/dotagents/dotclaude/data/progress-tracking.json
 ```
 
 Look up the project by name. If the project isn't found, tell the user
@@ -141,15 +146,27 @@ writing an accurate "coming next" section.
 
 For each issue, decide whether it's relevant to the project based on:
 
-1. **Project context** from the config (e.g., for hedge-bot: liquidity bot,
-   hedging, rebalancing, vaults, Raindex, Alpaca, order strategies,
-   staging/prod deployment)
+1. **Project context** from the config:
+   - **hedge-bot**: liquidity bot — hedging, rebalancing, vaults, Raindex,
+     Alpaca, order strategies, staging/prod deployment
+   - **issuance-bot**: Alpaca ITN issuer — minting, redemption, account
+     linking, asset/token management, dividends and corporate actions, new
+     token launches, the Rain SFT (`OffchainAssetReceiptVault`) contracts
 2. **Issue description** — does it mention components, features, or bugs
    related to this project?
 3. **Labels and Linear project assignment** — if assigned to a matching
    Linear project, include it
-4. **Common sense** — an issue about "website redesign" is not hedge-bot;
-   an issue about "fix hedging gap calculation" is
+4. **Common sense** — an issue about "website redesign" belongs to neither
+   bot; "fix hedging gap calculation" is hedge-bot; "redemption journaling
+   error" is issuance-bot
+
+**Both bots share the RAI team and some code** (notably the event-sourcing /
+CQRS core, `event-sorcery`). Watch for two things:
+- The other bot's work will appear in the query results — exclude it and note
+  why, per the Excluded Issues section.
+- Genuinely cross-cutting work (e.g. an `event-sorcery` change, shared
+  tooling) can be **included** for whichever bot the report is about when it
+  landed in or directly serves that bot's repo — say so explicitly.
 
 Classify each issue as:
 - **INCLUDED** — relevant to the project
@@ -181,10 +198,17 @@ understand the planned roadmap:
 linear milestone list --project "<project name>" --json
 ```
 
-Run this for each relevant Linear project (e.g., "Live MVP of st0x.liquidity bot",
-"Robust liquidity management with auto-recovery"). Milestones define the
-intended sequencing — use them to understand what phase the team is in
-and what the next milestone is.
+Run this for each relevant Linear project. The relevant projects depend on
+which bot the report is about:
+- **hedge-bot**: e.g. "Live MVP of st0x.liquidity bot", "Robust liquidity
+  management with auto-recovery", "ST0x observability, hardening, and testing".
+- **issuance-bot**: e.g. "Issuance Bot Improvements", "Dividends", "New Token
+  Launches", "Corporate-action-aware oracle".
+
+(Confirm the actual project names from the Linear data each run — don't assume
+the lists above are exhaustive or current.) Milestones define the intended
+sequencing — use them to understand what phase the team is in and what the next
+milestone is.
 
 Also look at all **Todo** and **Backlog** issues (not just In Progress /
 In Review) to identify the forward workplan. From these, determine:
@@ -292,7 +316,7 @@ single one.
 2. **Save the report** to disk:
 
    ```bash
-   # File: ~/Github/dotclaude/data/progress-tracking/reports/<project>-<YYYY-MM-DD>.md
+   # File: ~/Github/dotagents/dotclaude/data/progress-tracking/reports/<project>-<YYYY-MM-DD>.md
    ```
 
    Use `Write` to save the report. If a report for the same project and
@@ -304,14 +328,14 @@ single one.
    # Read, update last_run to current ISO datetime, write back
    ```
 
-   Read `~/Github/dotclaude/data/progress-tracking.json`, update the
+   Read `~/Github/dotagents/dotclaude/data/progress-tracking.json`, update the
    project's `last_run` to the current datetime (ISO 8601), and write it
    back using `Write`.
 
 4. **Confirm**:
 
    ```
-   Report saved: ~/Github/dotclaude/data/progress-tracking/reports/<project>-<date>.md
+   Report saved: ~/Github/dotagents/dotclaude/data/progress-tracking/reports/<project>-<date>.md
    Last run updated to: <datetime>
    ```
 
@@ -331,7 +355,7 @@ single one.
 
 - **Linear auth expired**: tell the user to run `linear auth login`.
 - **Repo path doesn't exist**: tell the user and suggest updating the
-  config file at `~/Github/dotclaude/data/progress-tracking.json`.
+  config file at `~/Github/dotagents/dotclaude/data/progress-tracking.json`.
 - **No issues found**: report git activity only, note no Linear activity.
 - **No commits found**: report Linear activity only, note no git activity.
 - **First run (last_run is null)**: default to 14 days, tell the user.
