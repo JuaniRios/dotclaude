@@ -1,6 +1,6 @@
 ---
 name: check-liquidity-bot
-description: "Use when the user asks to run the former Claude /check-liquidity-bot workflow: Run `staging-status` or `prod-status`, read downloaded logs/DB/trades, and diagnose whether the liquidity bot is healthy — hedging, rebalancing, errors, and overall status."
+description: "Use when the user asks to run the former Claude /check-liquidity-bot workflow: diagnose the liquidity bot's health (hedging, rebalancing, errors, overall status). Default mode downloads a snapshot via `staging-status`/`prod-status`; add `remote` to skip the download and query the live server directly via `staging-remote`/`prod-remote`."
 ---
 
 # check-liquidity-bot
@@ -15,19 +15,41 @@ Compatibility notes:
 - When the workflow mentions another slash command, use the corresponding Codex skill or follow that workflow directly.
 
 **Required argument**: `prod` or `staging`. This determines which environment
-to check and which status command to run.
+to check.
 
-If the argument is missing or not one of `prod`/`staging`, tell the user:
-"Usage: `/check-liquidity-bot <prod|staging>`" — and stop.
+**Optional second argument**: `remote`. When provided, skip the snapshot
+download (`prod-status` / `staging-status`) entirely and query the live server
+directly via `prod-remote` / `staging-remote`. Use this for fast, fresh
+checks when you don't need the Raindex order JSON / trade CSVs that only the
+snapshot produces.
 
-Set the status command based on the argument:
-- `staging` → `staging-status`
-- `prod` → `prod-status`
+If the first argument is missing or not one of `prod`/`staging`, tell the user:
+"Usage: `/check-liquidity-bot <prod|staging> [remote]`" — and stop.
 
-Run the chosen command to fetch live data from the server, then analyze the
-downloaded artifacts to produce a health report.
+If a second argument is present and is not `remote`, tell the user the same
+usage line and stop.
+
+Determine the mode:
+- **Snapshot mode** (default, no second argument): run `staging-status` or
+  `prod-status`, download artifacts, analyze them locally.
+- **Remote mode** (`remote` second argument): skip the download entirely. Run
+  all DB and log queries through `<env>-remote` against the live server. Go
+  straight to section 3 and use the remote query patterns documented in each
+  subsection.
+
+Set the status command (snapshot mode only) and the remote shim based on the
+environment:
+- `staging` → `staging-status` / `staging-remote`
+- `prod` → `prod-status` / `prod-remote`
+
+In snapshot mode, run the chosen status command to fetch live data, then
+analyze the downloaded artifacts. In remote mode, skip sections 1 and 2 and
+jump to section 3.
 
 ## 1. Run status command
+
+**Snapshot mode only.** In remote mode, skip directly to section 3.
+
 
 ```bash
 <staging-status or prod-status>
@@ -56,6 +78,8 @@ Do not guess credentials or identities. Ask the user and wait.
 
 ## 2. Locate the output directory
 
+**Snapshot mode only.** In remote mode, skip directly to section 3.
+
 The script saves everything under `./claude-local-ctx/<timestamp>-<status>/`.
 Find the most recent one:
 
@@ -75,17 +99,37 @@ Expected files:
 
 ## 3. Analyze bot status
 
-Work through each section below. Use `sqlite3` for all DB queries (never
-`Read` on the .db file). Use `Read` for logs, JSON, and CSV files.
+Work through each section below.
+
+- **Snapshot mode**: use `sqlite3` against the downloaded `st0x-hedge.db`
+  (never `Read` on the .db file). Use `Read` for `logs.txt`, JSON, and CSV
+  files.
+- **Remote mode**: route every DB query through
+  `<env>-remote sqlite3 /mnt/data/st0x-hedge.db "..."` and every log query
+  through `<env>-remote journalctl -u st0x-hedge ...`. Do not download files.
 
 ### 3a. Service health
 
-From the directory name, determine if the bot is `running` or `stopped`.
+- **Snapshot mode**: from the directory name, determine if the bot is
+  `running` or `stopped`.
+- **Remote mode**: run `<env>-remote systemctl is-active st0x-hedge` (and
+  `<env>-remote systemctl status st0x-hedge --no-pager` for details).
+
 If stopped, this is the most critical finding -- lead the report with it.
 
 ### 3b. Logs analysis
 
-Read the logs file (`logs.txt`). It can be large, so focus on:
+In **snapshot mode**, read the logs file (`logs.txt`). It can be large, so
+focus on the items below.
+
+In **remote mode**, pull a recent window from the server instead, e.g.:
+```bash
+<env>-remote "journalctl -u st0x-hedge --since '24 hours ago' --no-pager"
+<env>-remote "journalctl -u st0x-hedge --since '1 hour ago' --no-pager | grep -iE 'error|warn|panic'"
+```
+Filter at the source -- never pull the full journal.
+
+Focus on:
 
 - **Recent errors/warnings**: grep for `ERROR` and `WARN` in the last ~500
   lines. Categorize them:
@@ -108,10 +152,16 @@ disabled assets will not produce offchain hedges -- this is intentional and
 working as designed. Note disabled-asset activity as INFO, never as WARNING
 or CRITICAL.
 
-Query the downloaded DB for offchain orders:
+Query the DB for offchain orders. In **snapshot mode**:
 
 ```bash
 sqlite3 <db_path> "SELECT view_id, status, payload FROM offchain_order_view ORDER BY rowid DESC LIMIT 30;"
+```
+
+In **remote mode**:
+
+```bash
+<env>-remote sqlite3 /mnt/data/st0x-hedge.db "SELECT view_id, status, payload FROM offchain_order_view ORDER BY rowid DESC LIMIT 30;"
 ```
 
 Check (only for **trade-enabled assets**):
@@ -137,16 +187,24 @@ For **trade-disabled assets**: if onchain trades are happening, note them as
 informational context ("X trades on disabled asset Y -- unhedged by design").
 Do not flag this as a hedging failure.
 
-Also check event type distribution:
+Also check event type distribution (snapshot mode):
 
 ```bash
 sqlite3 <db_path> "SELECT event_type, COUNT(*) as cnt FROM events GROUP BY event_type ORDER BY cnt DESC;"
 ```
 
+In **remote mode**, prefix with `<env>-remote sqlite3 /mnt/data/st0x-hedge.db`.
+
 ### 3d. Inventory and position analysis
 
+Snapshot mode:
 ```bash
 sqlite3 <db_path> "SELECT * FROM position_view;"
+```
+
+Remote mode:
+```bash
+<env>-remote sqlite3 /mnt/data/st0x-hedge.db "SELECT * FROM position_view;"
 ```
 
 Check:
@@ -166,11 +224,17 @@ Check:
 The status output shows whether rebalancing is enabled or disabled per asset.
 
 If rebalancing is **enabled** for any asset:
-- Query for rebalancing events:
+- Query for rebalancing events. Snapshot mode:
   ```bash
   sqlite3 <db_path> "SELECT event_type, payload FROM events WHERE event_type LIKE '%Rebalanc%' ORDER BY rowid DESC LIMIT 20;"
   ```
+  Remote mode:
+  ```bash
+  <env>-remote sqlite3 /mnt/data/st0x-hedge.db "SELECT event_type, payload FROM events WHERE event_type LIKE '%Rebalanc%' ORDER BY rowid DESC LIMIT 20;"
+  ```
 - Grep logs for `rebalanc` (case-insensitive) to find rebalancing activity.
+  In remote mode use:
+  `<env>-remote "journalctl -u st0x-hedge --since '24 hours ago' --no-pager | grep -i rebalanc"`.
 - Check if vault balances are being maintained within expected ranges.
 - Look for rebalancing errors or failures.
 
@@ -178,6 +242,11 @@ If rebalancing is **disabled** for all assets, note it briefly and skip
 detailed analysis.
 
 ### 3f. Raindex orders analysis
+
+**Snapshot mode only.** The Raindex order JSON and per-order trade CSVs are
+produced by the `<env>-status` snapshot script -- they are not available on the
+live server. In remote mode, skip this section and note in the report that
+Raindex order / trade analysis was not performed because remote mode was used.
 
 Read `raindex-orders-decoded.json`:
 - **Active order count**: zero means the bot has no onchain presence.
