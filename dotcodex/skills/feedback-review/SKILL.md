@@ -1,6 +1,6 @@
 ---
 name: feedback-review
-description: "Use when the user asks to run the former Claude /feedback-review workflow: Triage and address PR feedback (CodeRabbit + human reviewer comments) on the current branch. Summarizes each comment with severity and agent opinion, asks which to implement, fixes chosen ones, and drafts replies for dismissed or differently-handled comments."
+description: "Use when the user asks to run the former Claude /feedback-review workflow: Triage and address PR feedback (CodeRabbit inline, out-of-diff, and human reviewer comments) on the current branch. Summarizes each comment with severity and agent opinion, asks which to implement, fixes chosen ones, and drafts replies for dismissed or differently-handled comments."
 ---
 
 # feedback-review
@@ -15,8 +15,9 @@ Compatibility notes:
 - When the workflow mentions another slash command, use the corresponding Codex skill or follow that workflow directly.
 
 Triage and address review feedback on the current branch's PR. Pulls all
-pending review comments (CodeRabbit and human), summarizes them, collects
-decisions, implements fixes, and handles replies -- all in one session.
+pending review comments (CodeRabbit inline/out-of-diff and human), summarizes
+them, collects decisions, implements fixes, and handles replies -- all in one
+session.
 
 Follow these steps precisely.
 
@@ -111,15 +112,33 @@ gh api repos/{owner}/{repo}/issues/{number}/comments \
   > /tmp/pr-issue-comments.json
 ```
 
+Top-level comments matter for CodeRabbit: when it cannot attach a finding to
+the PR diff, it often emits an "outside diff range" / "out-of-diff" finding in a
+general PR comment instead of a review thread. Do not treat every CodeRabbit
+top-level comment as a summary. Keep CodeRabbit issue comments that contain
+actionable review sections such as "Potential issue", "Suggestion", "Outside diff
+range", "out of diff", explicit file paths/line references, or wording that asks
+for a code/config/doc change. Skip only boilerplate comments such as
+walkthroughs, pre-merge checks, finishing touches, share/tips blocks, and merge
+queue/status comments.
+
 ## 3. Filter to actionable feedback
 
-From the **unresolved** threads, keep only **actionable feedback** -- comments
-that request a code change, flag a bug, suggest an improvement, or ask a
-question that needs a response. Skip:
+From the **unresolved** threads and actionable top-level comments, keep only
+**actionable feedback** -- comments that request a code change, flag a bug,
+suggest an improvement, or ask a question that needs a response. Skip:
 
-- Bot summary comments (CodeRabbit's top-level "walkthrough" posts)
+- Bot summary comments (CodeRabbit's top-level "walkthrough" posts, pre-merge
+  checks, finishing touches, share/tips blocks)
 - Pure praise / acknowledgement comments ("LGTM", "looks good", etc.)
 - The PR author's own comments (unless they're self-review requesting changes)
+
+For CodeRabbit top-level comments, split the comment into individual actionable
+review items when it contains multiple findings. Preserve each item's comment
+URL and any file/line text CodeRabbit provided. Mark the `file` field as
+`general` only when CodeRabbit did not provide a path. These comments do not
+have GitHub review-thread resolution status, so treat them as pending unless a
+later reply clearly says the item was fixed, resolved, or superseded.
 
 For each remaining comment, classify the **source**:
 
