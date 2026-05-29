@@ -79,34 +79,45 @@ BRANCH="$(git branch --show-current)"
 cancel_retries=0
 newest_run() {
   gh run list --branch "$BRANCH" --limit 1 \
-    --json databaseId,status,conclusion,headSha \
-    --jq '.[0] | "\(.databaseId)\t\(.status)\t\(.conclusion)\t\(.headSha)"'
+    --json databaseId,status,conclusion,headSha,url \
+    --jq '.[0] | "\(.databaseId)\t\(.status)\t\(.conclusion)\t\(.headSha)\t\(.url)"'
 }
 while true; do
-  read -r RID STATUS CONCLUSION SHA <<<"$(newest_run)"
+  read -r RID STATUS CONCLUSION SHA URL <<<"$(newest_run)"
   if [[ -z "${RID:-}" ]]; then echo "No run yet for $BRANCH; retrying..."; sleep 10; continue; fi
   if [[ "$STATUS" != "completed" ]]; then
     echo ">> Watching run $RID (sha ${SHA:0:8}, status=$STATUS)"
+    echo ">> URL: $URL"
     gh run watch "$RID" --exit-status
-    read -r RID STATUS CONCLUSION SHA <<<"$(newest_run)"
+    read -r RID STATUS CONCLUSION SHA URL <<<"$(newest_run)"
   fi
   case "$CONCLUSION" in
-    success) echo "CI_RESULT=success run=$RID sha=${SHA:0:8}"; exit 0 ;;
+    success) echo "CI_RESULT=success run=$RID sha=${SHA:0:8} url=$URL"; exit 0 ;;
     cancelled)
       cancel_retries=$((cancel_retries + 1))
       if (( cancel_retries > 12 )); then
-        echo "CI_RESULT=cancelled run=$RID sha=${SHA:0:8} (no replacement)"; exit 1
+        echo "CI_RESULT=cancelled run=$RID sha=${SHA:0:8} url=$URL (no replacement)"; exit 1
       fi
       echo ">> Run $RID cancelled; looking for replacement (try $cancel_retries)..."; sleep 10 ;;
     "") echo ">> Newest run is in progress; following it."; cancel_retries=0 ;;
-    *) echo "CI_RESULT=$CONCLUSION run=$RID sha=${SHA:0:8}"; exit 1 ;;
+    *) echo "CI_RESULT=$CONCLUSION run=$RID sha=${SHA:0:8} url=$URL"; exit 1 ;;
   esac
 done
 EOF
 bash /tmp/ci-poll.sh
 ```
 
-Tell the user CI is running (~10 min) and continue with any remaining light work.
+After launching the poller, **immediately fetch and report the run URL to the
+user** so they can check status themselves without waiting for you:
+
+```bash
+gh run list --branch "$(git branch --show-current)" --limit 1 \
+  --json url,databaseId --jq '.[0].url'
+```
+
+Tell the user CI is running (~10 min), paste the run URL, and continue with any
+remaining light work. (The poller's output file also prints `>> URL: …` and the
+final `CI_RESULT=… url=…` line, so the URL is always visible there too.)
 
 ### 4. When CI finishes
 
