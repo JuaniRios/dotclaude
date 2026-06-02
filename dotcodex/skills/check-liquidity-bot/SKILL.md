@@ -46,6 +46,32 @@ In snapshot mode, run the chosen status command to fetch live data, then
 analyze the downloaded artifacts. In remote mode, skip sections 1 and 2 and
 jump to section 3.
 
+## Inspecting the codebase to interpret behavior
+
+Whenever you need to read the bot's source code to explain its behavior --
+what a log line means, how hedging/rebalancing logic works, what an error
+implies, which code path produced an observation -- **do NOT read the current
+working-tree or checked-out branch.** The current branch may contain unmerged
+or unreleased changes that do not reflect what is actually running in the
+environment you are diagnosing. Reasoning from it will produce wrong
+conclusions.
+
+Instead, inspect the code at the exact commit deployed to that environment:
+
+1. **Determine the deployed commit/version.** The `<env>-status` /
+   `<env>-remote` output reports the deployed version (see "deployed version"
+   in the report). If it is not obvious from the status output, query the
+   server for the running build, e.g.
+   `<env>-remote systemctl status st0x-hedge --no-pager` or the service's
+   reported version, and resolve it to a git commit.
+2. **Read the code at that commit, read-only.** Use
+   `git show <commit>:<path>` or `git grep <pattern> <commit>` against the
+   local repo history. Never `git checkout`, never edit files, never assume the
+   working tree matches.
+3. If you cannot resolve the deployed commit, say so explicitly and state that
+   any code-behavior claims are provisional -- do not silently fall back to the
+   current branch.
+
 ## 1. Run status command
 
 **Snapshot mode only.** In remote mode, skip directly to section 3.
@@ -350,7 +376,11 @@ When to fall back to a full `prod-status` / `staging-status` rerun:
 6. Report findings honestly -- don't minimize issues or speculate beyond what
    the data shows.
 7. Never use `Read` on the `.db` file -- always use `sqlite3` queries.
-8. Never re-run `prod-status` / `staging-status` for follow-up questions after
+8. When inspecting source code to explain behavior, read the code at the
+   deployed commit, never the current working-tree branch (see "Inspecting the
+   codebase to interpret behavior"). Never `git checkout` -- use
+   `git show <commit>:<path>` / `git grep <commit>`.
+9. Never re-run `prod-status` / `staging-status` for follow-up questions after
    the initial report. Use `prod-remote` / `staging-remote` for live queries.
    Only refetch the full snapshot when the user explicitly asks, or when you
    need data the remote shims can't get (e.g. fresh Raindex order JSON).
