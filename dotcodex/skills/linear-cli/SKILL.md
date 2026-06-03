@@ -20,6 +20,19 @@ Adapted from the upstream skill at https://github.com/schpet/linear-cli for use
 in this user's dotfiles. Manages Linear issues, projects, cycles, milestones,
 and documents. Git- and jj-aware.
 
+## Default team: RAI
+
+**The default Linear team for this user is `RAI`** (Rain, workspace
+`makeitrain`). Unless the user explicitly names a different team, **always pass
+`--team RAI`** — on `issue create`, and on `issue list` / `issue query` /
+`label list`. Never default to `GUA` or any other team (a previous mis-default
+to GUA required moving the issue afterward).
+
+When creating an issue, pick labels from RAI's set (`linear label list --team
+RAI`) or Workspace-scoped labels — team-scoped labels from other teams (e.g.
+GUA's `area/chain`, `observability`) will not apply to a RAI issue. To move a
+mis-filed issue, `linear issue update <ID> --team RAI` reassigns the identifier.
+
 ## Prerequisites
 
 The `linear` command must be on PATH:
@@ -243,6 +256,38 @@ Linear CLI loads `.linear.toml` from (in order): cwd → repo root →
 `linear config` generates this file interactively. Commit it for repo-specific
 defaults; rely on `~/.config/linear/linear.toml` for global ones.
 
+## Creating issues: required metadata
+
+**Every new issue MUST be assigned to a project, and defaults to being assigned
+to this user.** Before running `linear issue create`, always confirm these four
+fields with the user in a single concise question (batch all four):
+
+1. **Project** (required — an issue without a project is not allowed). If the
+   user didn't name one, run `linear project list --team RAI` and offer the
+   options. Never create an issue with no `--project`.
+2. **Milestone** (optional). If the chosen project has milestones, run
+   `linear milestone list --project <id>` and offer them, plus a "none" choice.
+3. **Assignee** — **default to this user** (`--assignee self`). Present "me
+   (default)" as the default; only assign someone else if the user picks them.
+4. **Priority** — number `1`–`4` (1=urgent, 2=high, 3=medium, 4=low), or none.
+
+Resolve the confirmed answers into flags, then create:
+
+```bash
+linear issue create \
+  --title "..." \
+  --description-file "$tmp" \
+  --team RAI \
+  --project "Phase 1" \
+  --milestone "Beta" \
+  --assignee self \
+  --priority 2
+```
+
+Skip the question only when the user has already explicitly specified all of
+project, assignee, and priority in their request — but still never omit
+`--project`.
+
 ## Drafting issues from review findings / bugs
 
 When creating issues from code review findings or bugs discovered during
@@ -278,13 +323,17 @@ implementation, use this workflow:
    running `linear issue create`. Never auto-create without approval — the user
    should see the title, description, project, milestone, and priority first.
 
-3. **Create the issue**, passing the description file and any applicable
-   metadata. Prefer `--project`, `--priority`, and labels when known:
+3. **Create the issue** after confirming the required metadata (see "Creating
+   issues: required metadata" — project is mandatory, assignee defaults to
+   `self`):
 
    ```bash
    linear issue create \
      --title "Fix off-by-one in <foo>" \
      --description-file "$tmp" \
+     --team RAI \
+     --project "Phase 1" \
+     --assignee self \
      --priority 2 \
      --label bug
    ```
@@ -332,9 +381,12 @@ curl -s -X POST https://api.linear.app/graphql \
 
 1. **Never create issues without user confirmation.** Draft, show, wait for
    approval, then run `linear issue create`.
-2. **Always use `--description-file` / `--body-file`** for markdown content.
-3. **Run `--help` on the exact subcommand** before guessing flags.
-4. `linear issue list` requires `--sort` and usually `--team`. Don't forget.
-5. For structured output that another tool will parse, pass `--json`.
-6. Prefer the CLI over raw `linear api` — fall back to GraphQL only for
+2. **Every new issue MUST have a `--project`, and defaults to `--assignee
+   self`.** Confirm project, milestone, assignee, and priority with the user
+   before creating. Never create an issue with no project.
+3. **Always use `--description-file` / `--body-file`** for markdown content.
+4. **Run `--help` on the exact subcommand** before guessing flags.
+5. `linear issue list` requires `--sort` and usually `--team`. Don't forget.
+6. For structured output that another tool will parse, pass `--json`.
+7. Prefer the CLI over raw `linear api` — fall back to GraphQL only for
    genuinely unsupported operations.
