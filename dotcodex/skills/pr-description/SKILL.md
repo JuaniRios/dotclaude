@@ -164,6 +164,12 @@ Fill every section of the template based on what you read in the diff. Rules:
 - **Match the repo's tone.** If previous PR descriptions in the repo use
   bullet points vs. prose, match them. Check with `gh pr list --limit 5
   --json body --jq '.[].body' | head -100`.
+- **Do not hard-wrap body text.** Write each paragraph and bullet as one
+  continuous line — let it run long. GitHub and the Graphite dashboard wrap
+  soft-wrapped text to the viewport; manual newlines mid-sentence render as
+  ragged breaks. Only insert newlines where they're semantically real
+  (between paragraphs, list items, headings, code blocks). This is the
+  opposite of the 80-char wrapping convention used in source/markdown files.
 
 ## 7. Stack mode
 
@@ -265,3 +271,5 @@ And a one-line confirmation per PR updated.
 6. Use `gt submit` to open new PRs, never `gh pr create`.
 7. Never leave a bare Linear ID (`RAI-374`, `LINEAR-456`, etc.) in a PR
    body — always render it as a markdown hyperlink to the Linear issue.
+8. Never hard-wrap PR body text — write each paragraph/bullet as one long
+   line and let the UI soft-wrap it. Newlines only between semantic blocks.
