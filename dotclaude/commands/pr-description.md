@@ -113,11 +113,22 @@ templates. If none exists, use this fallback structure:
 
 Draft a concise PR title (under 70 characters). Rules:
 
-- Use conventional-commit style: `type: short summary` (e.g.,
-  `feat: add buying power to status scripts`).
+- **Always use conventional-commit style: `type: short summary`** (e.g.,
+  `feat: add buying power to status scripts`, `fix: erroring rpc client`).
+  Pick the `type` that fits the change: `feat`, `fix`, `refactor`, `perf`,
+  `docs`, `test`, `chore`, etc. The title MUST start with one of these
+  prefixes followed by `: `.
+- **Never lead the title with an issue ID.** Titles must NOT start with a
+  Linear/Jira/GitHub issue key like `RAI-801:`, `LINEAR-456:`, or `#123:`.
+  The issue belongs in the body (linked), not the title. If a discovered or
+  existing title leads with an issue ID, strip the ID and rewrite the title in
+  conventional-commit form.
 - The title should capture the *what* at a glance — the body has the details.
-- If the existing PR already has a user-authored title that looks intentional,
-  preserve it and note it in the draft display.
+- If the existing PR already has a user-authored title that looks intentional
+  AND already complies with the rules above (conventional-commit prefix, no
+  leading issue ID), preserve it and note it in the draft display. Otherwise
+  rewrite it to comply — do not preserve a non-compliant title just because it
+  looks intentional.
 
 ### Description
 
