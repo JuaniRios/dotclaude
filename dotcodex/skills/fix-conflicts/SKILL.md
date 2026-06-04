@@ -43,10 +43,26 @@ For each conflicted file, read it and find all conflict regions
 Edit files to resolve, removing all conflict markers. Ensure the merged
 result is syntactically valid and includes all additions from both sides.
 
-## Step 5 — Verify
+## Step 5 — Verify (compile + lint, defer tests)
 
-Run `cargo check -p <relevant-crate>` after fixing. If it fails, diagnose
-and fix. Also run with `--all-features` to catch `cfg`-gated paths.
+After fixing a branch's conflicts, verify before continuing:
+
+1. `cargo check -p <relevant-crate> --all-features` — the fast compile gate.
+   This MUST pass before `gt continue`. `--all-features` catches `cfg`-gated
+   paths. If it fails, diagnose and fix.
+2. `cargo clippy -p <relevant-crate> --all-features` — catch lint regressions
+   the merge introduced, and fix them on the branch you're currently on (you're
+   already checked out there, so it's the cheapest place to fix).
+
+Both `cargo check` and `cargo clippy` already parallelize across all CPU cores
+by default — no flag needed to "use multiple cores." Scope with
+`-p <relevant-crate>` during iteration to keep each pass fast; reserve
+`--workspace` for a final confirmation.
+
+**Defer the test suite.** Do NOT run `cargo nextest` / `cargo test` during the
+conflict loop — it is slow and the merge mechanics are validated by compile +
+clippy. Leave tests to CI (or a single explicit final run only if the user asks
+at hand-off).
 
 ## Step 6 — Stage resolved files
 
@@ -57,8 +73,9 @@ and fix. Also run with `--all-features` to catch `cfg`-gated paths.
 This skill **drives the whole restack/sync to completion** — it does not stop
 after one branch. After resolving every conflict at the current stopping point:
 
-1. **Verify** (Step 5): run `cargo check` (with `--all-features`). NEVER run
-   `gt continue` on code that does not compile — fix it first.
+1. **Verify** (Step 5): run `cargo check` then `cargo clippy` (both
+   `--all-features`, scoped with `-p`). NEVER run `gt continue` on code that
+   does not compile — fix it first. Do NOT run the test suite here.
 2. **Stage** (Step 6): `git add` every resolved file.
 3. **Continue**: run `gt continue` to resume the interrupted operation.
 4. **Inspect the outcome and loop:**
@@ -91,7 +108,8 @@ Once the interrupted operation completes with no remaining conflicts:
 When the stack is fully resolved, restacked, and synced clean, tell the user:
 - Every branch that had conflicts and how each was resolved
 - Any conflicts that required a human decision (and what was decided)
-- Confirmation that `cargo check` passed and `gt restack` + `gt sync` are clean
+- Confirmation that `cargo check` + `cargo clippy` passed and `gt restack` +
+  `gt sync` are clean (tests were deferred to CI — say so)
 
 ### Stopping conditions (when the loop ends)
 
@@ -109,8 +127,10 @@ When the stack is fully resolved, restacked, and synced clean, tell the user:
    differently, STOP and ask the user. Never `gt continue` past a conflict you
    resolved by guessing.
 3. Do NOT delete code from either side unless clearly superseded.
-4. Always verify with `cargo check` BEFORE running `gt continue` — never
-   continue on code that does not compile.
+4. Always verify with `cargo check` (compile gate) AND `cargo clippy` (lints)
+   BEFORE running `gt continue` — never continue on code that does not compile.
+   Defer the test suite: do NOT run `cargo nextest` / `cargo test` in the loop;
+   leave it to CI.
 5. **Drive the stack to completion:** after resolving and verifying, run
    `gt continue` yourself and keep looping (resolve -> verify -> stage ->
    continue) until the whole stack is applied, then `gt restack` + `gt sync`,
