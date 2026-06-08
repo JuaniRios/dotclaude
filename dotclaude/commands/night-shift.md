@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob, Skill, Agent, AskUserQuestion, TodoWrite, EnterPlanMode, ExitPlanMode
-description: Autonomous overnight execution. Plans with you while you're awake, then drives the work with a /goal loop while you sleep — never prompting, deciding everything itself, self-reviewing, verifying locally, logging decisions and deferred items to a doc, and reviewing it interactively when you return.
+description: Autonomous overnight execution. Plans with you while you're awake, then drives the work itself under a self-armed goal loop while you sleep — never prompting, deciding everything itself, self-reviewing, verifying locally, logging decisions and deferred items to a doc, and reviewing it interactively when you return.
 argument-hint: <task description>
 ---
 
@@ -8,15 +8,16 @@ argument-hint: <task description>
 
 The user is going to sleep and wants to wake up with the task done. The shape is
 three phases: **plan with the user while they're awake → run autonomously under
-a `/goal` loop while they sleep → review the log interactively when they
+a self-armed goal loop while they sleep → review the log interactively when they
 return.** This skill layers a no-prompting contract, safety rails, and a
-decision log on top of the built-in `/goal` loop, and reuses the project's own
-review/CI skills for the heavy lifting.
+decision log on top of a Stop-hook goal loop the skill arms itself — no
+user-typed `/goal` required — and reuses the project's own review/CI skills for
+the heavy lifting.
 
 The task: `$ARGUMENTS` (if empty, use the task established in the conversation).
 
 Track the phases with `TodoWrite` so the morning transcript shows what happened:
-pre-flight plan → set goal → implement → self-review → verify → finalize log →
+pre-flight plan → arm goal → implement → self-review → verify → finalize log →
 morning review.
 
 ## Step 1 — Pre-flight plan & approval (while the user is awake)
@@ -30,8 +31,8 @@ present, via `ExitPlanMode`:
 
 - **Understanding** — one or two lines restating the task as you read it.
 - **Approach** — the ordered plan (main steps).
-- **Completion condition** — the exact `/goal` condition you'll set, including
-  the turn/time bound.
+- **Completion condition** — the exact goal condition you'll arm, including the
+  max-turns cap.
 - **Pre-made decisions** — notable choices you're committing to up front
   (libraries, structure, scope calls) so the user can veto now.
 - **Will defer** — anything you already know you'll park for morning approval
@@ -40,19 +41,36 @@ present, via `ExitPlanMode`:
 **Wait for the user to approve the plan.** Once approved, the no-prompting
 contract is in effect — proceed and ask nothing else until the goal clears.
 
-## Step 2 — Set the goal that drives the loop
+## Step 2 — Arm the goal that drives the loop
 
 Translate the approved plan into a single measurable completion condition and
-start it with `/goal`, bounded so it can't spin all night. Include the log doc
-in the condition so the loop doesn't clear before the handoff is ready:
+arm it with the goal-loop helper, bounded by a max-turns cap so it can't spin
+all night. Include the log doc in the condition so you don't release the loop
+before the handoff is ready. Run this **from the project root** (the session's
+working directory — the helper scopes the goal to that cwd, which is what the
+hook matches against):
 
-```
-/goal <approved completion condition, e.g. "feature X works and local checks pass">
-AND NIGHT-SHIFT-LOG.md is fully updated, or stop after <N> turns
+```bash
+~/Github/dotagents/dotclaude/hooks/goal-loop/goal-set.sh \
+  "<approved completion condition, e.g. 'feature X works and local checks pass'> AND NIGHT-SHIFT-LOG.md is fully updated" \
+  <N>   # max turns — the hard runaway cap (e.g. 40)
 ```
 
-`/goal`'s evaluator only judges what's visible in the transcript, so surface
-your verification (test/check output) in your turns — don't verify silently.
+This writes a goal state file scoped to the current directory. A global `Stop`
+hook (`check-goal.sh`) then blocks the session from stopping after every turn,
+re-feeding the condition as your next directive — until you clear the goal or
+the turn cap is hit. There is **no separate model evaluator**: *you* self-audit
+completion. Surface your verification (test/check output) in your turns so the
+audit is grounded and visible. When the condition genuinely holds and the log
+is updated — or you are truly blocked — release the loop and let the session
+stop:
+
+```bash
+~/Github/dotagents/dotclaude/hooks/goal-loop/goal-clear.sh
+```
+
+After arming, just keep working: the loop engages the moment you would
+otherwise stop, and the hook's injected directive carries the objective forward.
 
 ## Operating rules while the loop runs
 
@@ -150,7 +168,7 @@ morning's source of truth and lets a fresh run resume.
    is the one allowed prompt; after it, ask nothing until the goal clears.
 2. Never take an irreversible or outward-facing action (push, submit, deploy,
    send, delete, spend) silently — defer it to the log for morning approval.
-3. Always bound the `/goal` with a turn/time limit.
+3. Always bound the goal with a max-turns cap (the `goal-set.sh <N>` arg).
 4. Keep `NIGHT-SHIFT-LOG.md` updated continuously, not just at the end.
 5. Verify locally (visibly in-transcript) before the goal clears; remote CI
    waits for morning.
@@ -160,8 +178,9 @@ morning's source of truth and lets a fresh run resume.
 
 ## Failure modes
 
-- **Everything is blocked.** Let the goal stop, write up exactly what's blocking,
-  have it ready for morning rather than spinning the turn budget.
+- **Everything is blocked.** Clear the goal (`goal-clear.sh`) and let the session
+  stop, write up exactly what's blocking, have it ready for morning rather than
+  spinning the turn budget.
 - **Context runs out mid-task.** The continuously-updated log lets a fresh run
   read `NIGHT-SHIFT-LOG.md` and resume.
 - **Checks won't go green.** Cap the rounds, log the remaining failures as a
