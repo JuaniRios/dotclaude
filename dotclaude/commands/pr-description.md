@@ -1,11 +1,14 @@
 ---
-allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(mkdir:*), Bash(cat:*), Bash(test:*), Bash(basename:*), Bash(date:*), Bash(wc:*), Read, Write, Skill
-description: Draft a thorough PR title and description for the current branch using the repo's PR template and the full parent-aware diff. Shows the draft and waits for confirmation before updating GitHub.
+allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(codex:*), Bash(mkdir:*), Bash(cat:*), Bash(test:*), Bash(basename:*), Bash(date:*), Bash(wc:*), Bash(command:*), Read, Write, Skill
+description: Draft a concise, scannable PR title and description for the current branch from the full parent-aware diff and repo template, run a Codex reviewer over the draft, then push to GitHub automatically.
 argument-hint: [--stack] (optional — draft descriptions for every branch in the stack)
 ---
 
-Draft a thorough pull-request title and description for the current branch
-and, after user approval, push it to GitHub.
+Draft a pull-request title and description for the current branch, run a
+Codex reviewer over the draft, then push it to GitHub automatically. The
+draft must be thorough in *coverage* (read the whole diff) but *concise* in
+output — short and scannable by a reviewer with zero context, not a wall of
+prose.
 
 Follow these steps precisely.
 
@@ -14,8 +17,9 @@ Follow these steps precisely.
 Invoke the `graphite` skill. You will be using `gt` for all version-control
 reads in this command; raw `git` is only acceptable for read-only inspection
 (`git diff`, `git log`, `git rev-parse`). Do **not** run `git commit`,
-`gt modify`, `gt submit`, or any other mutating command until the user
-explicitly confirms the final description.
+`gt modify`, `gt submit`, or any other mutating command until you have drafted
+the description and run the Codex review pass (step 8). After that, push without
+asking — the Codex review is the gate, not a human confirmation.
 
 ## 2. Orient on the branch
 
@@ -134,6 +138,12 @@ Draft a concise PR title (under 70 characters). Rules:
 
 Fill every section of the template based on what you read in the diff. Rules:
 
+- **Concise and scannable above all.** Someone with zero context should grasp
+  the PR in under 30 seconds. Prefer tight bullets over paragraphs, lead with
+  the point, and cut filler. A reviewer should never have to wade through prose
+  to find what changed. Aim for the shortest description that still covers the
+  what/why/how/testing — if a sentence doesn't help a context-free reader
+  understand or review the change, drop it.
 - **Accurate, not flowery.** Describe what the code actually does, not what
   you wish it did. If the diff is a refactor, say so. Don't overstate impact.
 - **Concrete.** Reference specific functions, files, and symbols — not
@@ -182,42 +192,88 @@ If the user passed `--stack` (check `$ARGUMENTS`):
 - Show **all** drafts at once in step 8 so the user can review them in
   order.
 
-## 8. Show the draft(s) and wait for confirmation
+## 8. Codex review pass
 
-Print each draft inside a labeled code block. For a single branch:
+Before pushing, get a second opinion from a Codex reviewer on whether the
+draft accurately and concisely describes the diff. This replaces the human
+confirmation step — the Codex reviewer is the quality gate.
 
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Draft PR — <branch>
-(existing PR: #<n> — will be updated)   [or: no PR yet — will be created]
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+First check Codex is available: `command -v codex`. If it's missing, skip this
+step (note it in the output) and proceed straight to push.
+
+Write the draft (title + body) and pipe the diff to Codex:
+
+```bash
+cat "$out_dir/diff.patch" | codex exec \
+  --sandbox read-only \
+  -m gpt-5.5 \
+  -C "$repo_root" \
+  "The diff is on stdin. Below is a proposed PR title and description for it.
 
 Title: <draft title>
 
-<full draft body>
+<draft body>
+
+Review the description against the diff. Check: (1) is it ACCURATE — does it
+match what the diff actually does, with no invented tests/changes? (2) is it
+CONCISE and scannable — could someone with zero context grasp the PR in 30
+seconds, or is it bloated with filler? (3) is anything important MISSING — a
+breaking change, migration, or risky change not called out?
+
+If the draft is good as-is, reply with exactly 'LGTM'. Otherwise reply with a
+short bulleted list of concrete fixes (what to cut, what to add, what to
+correct). Be terse — no preamble." \
+  > "$out_dir/codex-review.log" 2>&1
+```
+
+Extract Codex's reply after the bare `codex` marker line (same as `/review-pr`):
+
+```bash
+marker=$(grep -n '^codex$' "$out_dir/codex-review.log" | tail -1 | cut -d: -f1)
+test -n "$marker" && tail -n +$((marker + 1)) "$out_dir/codex-review.log" | sed '/^tokens used$/,$d'
+```
+
+If Codex hits a daily quota error (`rate_limit`/`quota`), retry once with
+`-m o3`. If it still fails, skip the review and proceed to push.
+
+**Apply Codex's feedback automatically** when it's reasonable — incorporate the
+suggested cuts/additions/corrections into the draft. You do not need user
+approval to apply them. If Codex says `LGTM`, keep the draft as-is. Briefly note
+in the output what Codex flagged and what you changed (or that it was clean).
+
+`$out_dir` is a scratch dir you create up front, e.g.
+`out_dir=$(mktemp -d -t pr-desc.XXXXXX)`. Write the parent-aware diff from step 3
+to `$out_dir/diff.patch` so it's available here.
+
+## 9. Show the final draft and push automatically
+
+Print the final draft (post-Codex) inside a labeled code block, for the user's
+records — do **not** wait for confirmation:
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PR description — <branch>
+(existing PR: #<n> — updating)   [or: no PR yet — creating]
+Codex: <LGTM | applied: <one-line summary of changes> | skipped: <reason>>
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Title: <final title>
+
+<full final body>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
-Then **stop and wait for the user to confirm**. Do not push. Ask explicitly:
-
-> Should I push this description to GitHub? (yes / edit: <notes> / no)
-
-If the user asks for edits, revise and show again. Never push without an
-explicit "yes" or equivalent.
-
-## 9. Push the description
-
-After the user confirms:
+Then push immediately using the mechanics below.
 
 - **If a PR already exists:**
 
   ```bash
   body_file=$(mktemp -t pr-body.XXXXXX.md)
   cat > "$body_file" <<'EOF'
-  <approved description here>
+  <final description here>
   EOF
-  gh pr edit <pr-number> --title "<approved title>" --body-file "$body_file"
+  gh pr edit <pr-number> --title "<final title>" --body-file "$body_file"
   rm "$body_file"
   ```
 
@@ -228,13 +284,13 @@ After the user confirms:
   ```bash
   body_file=$(mktemp -t pr-body.XXXXXX.md)
   cat > "$body_file" <<'EOF'
-  <approved description here>
+  <final description here>
   EOF
   gt submit --no-interactive --no-edit-description
   # gt submit does not accept --body-file directly; after it opens the PR,
   # use gh pr edit to set the title and full description
   pr_num=$(gh pr view --json number --jq .number)
-  gh pr edit "$pr_num" --title "<approved title>" --body-file "$body_file"
+  gh pr edit "$pr_num" --title "<final title>" --body-file "$body_file"
   rm "$body_file"
   ```
 
@@ -263,14 +319,17 @@ And a one-line confirmation per PR updated.
 
 ## Hard rules
 
-1. Never push a PR description without explicit user confirmation.
-2. Always use `--body-file` with `gh pr edit` — never pass multi-line
+1. Push automatically after the Codex review pass — do **not** ask the user
+   for confirmation. The Codex reviewer is the quality gate, not the human.
+2. Keep the description concise and scannable — readable by someone with zero
+   context in under 30 seconds. Cut filler; never pad to look thorough.
+3. Always use `--body-file` with `gh pr edit` — never pass multi-line
    markdown as a `--body` string.
-3. Always diff against `gt parent`, never against trunk on a stacked branch.
-4. Preserve user-authored content from the existing PR body.
-5. Never fabricate tests, screenshots, or deploy notes that aren't real.
-6. Use `gt submit` to open new PRs, never `gh pr create`.
-7. Never leave a bare Linear ID (`RAI-374`, `LINEAR-456`, etc.) in a PR
+4. Always diff against `gt parent`, never against trunk on a stacked branch.
+5. Preserve user-authored content from the existing PR body.
+6. Never fabricate tests, screenshots, or deploy notes that aren't real.
+7. Use `gt submit` to open new PRs, never `gh pr create`.
+8. Never leave a bare Linear ID (`RAI-374`, `LINEAR-456`, etc.) in a PR
    body — always render it as a markdown hyperlink to the Linear issue.
-8. Never hard-wrap PR body text — write each paragraph/bullet as one long
+9. Never hard-wrap PR body text — write each paragraph/bullet as one long
    line and let the UI soft-wrap it. Newlines only between semantic blocks.
