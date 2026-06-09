@@ -1,6 +1,6 @@
 ---
 name: review-loop
-description: "Cross-review the current branch with Codex reviewers, optionally add one or two Claude CLI reviewers, adversarially verify findings before fixing, auto-fix, and re-review until clean using fast delta passes. Stops only for disputed findings or large changes. Pass `stack` in $ARGUMENTS to run the loop across the whole upstack, amending each branch."
+description: "Cross-review the current branch with Codex reviewers, optionally add one or two Claude CLI reviewers, adversarially verify findings before fixing, auto-fix, and re-review until clean. Each re-review is a fresh independent panel pass over the full diff (AI review is stochastic — every pass finds different issues) with fix-verification folded in; adaptive panel sizing keeps it fast. Stops only for disputed findings or large changes. Pass `stack` in $ARGUMENTS to run the loop across the whole upstack, amending each branch."
 ---
 
 # review-loop
@@ -26,13 +26,23 @@ are fixed without asking. The loop re-reviews after each fix pass to catch
 issues introduced by the fixes themselves. It stops when a review pass
 returns no new actionable findings.
 
-**Speed design:** the **first pass** runs the full reviewer panel. Each
-aggregated finding is adversarially verified **before** triage so false
-positives never cost a fix-and-re-review cycle. A **compile gate** runs
-after each fix pass so a broken fix never burns a review pass. **Re-review
-passes** run in fast delta mode (per-fix verifiers plus one broad sweep of
-the fix delta) unless the fixes were large enough to warrant re-running the
-full panel.
+**Why it loops:** AI review is stochastic — each independent pass over the
+same diff surfaces *different* findings. The loop runs **fresh full panel
+passes** (not narrow fix-delta sweeps) so coverage accumulates across passes;
+catching bugs the fixes introduced is a secondary benefit, folded into the
+same pass via fix-verification. It converges when an independent pass returns
+no new actionable findings.
+
+**Speed design:** every aggregated finding is adversarially verified
+**before** triage, so false positives never cost a fix-and-re-review cycle.
+Each lane's findings are verified as that lane finishes (no barrier waiting
+on the slowest reviewer), and the report is assembled deterministically (no
+synthesis pass on the critical path). The panel is **adaptively sized to the
+diff** (small diffs run fewer lanes) so a genuine full re-pass stays
+affordable. A **compile gate** runs after each fix pass so a broken fix never
+burns a review pass; a **formatter-only delta** is treated as verified by
+construction and never burns a pass. CI runs **concurrently** with the
+re-review.
 
 **Argument:** if `$ARGUMENTS` contains `stack`, run across the **entire
 upstack** — current branch and every branch above it — amending each branch as
@@ -313,6 +323,24 @@ Save each complete prompt (base + focus) to `$out_dir/prompt-{reviewer}.txt`.
 
 All reviewers and inspectors must be spawned in a **single message with
 parallel tool calls**. Do not run them sequentially.
+
+### Adaptive panel sizing (by diff size)
+
+A full independent panel runs **every** pass (re-review is for stochastic
+coverage, not just fix-checking — see step 12), so size the panel to the
+diff to keep each pass affordable. Inspectors are always included (cheap):
+
+- **< 50 changed lines:** the goal-evaluation reviewer + one broad-sweep
+  reviewer + all inspectors.
+- **50–500 lines:** the full reviewer set minus one overlapping reviewer.
+- **> 500 lines, or any diff touching security-sensitive paths** (auth,
+  secrets, payment/financial, on-chain, migrations): the full set.
+
+Security-sensitive paths force the full panel regardless of size. When in
+doubt, size up. To trim per-reviewer latency on routine diffs, run the Codex
+reviewer subagents at **medium** reasoning effort rather than the default
+(reviewing with a fixed output format does not need maximum deliberation on
+small diffs); reserve higher effort for large or security-sensitive diffs.
 
 ### Reviewers 1-5 — Codex Subagents
 
@@ -832,101 +860,101 @@ still run only after convergence.
 
 Then proceed directly to step 12 (re-review).
 
-## 12. Re-review loop (delta mode)
+## 12. Re-review loop (independent full passes)
 
-Re-review after every fix pass to catch issues introduced by the fixes.
-This is the core of the automatic loop.
+Re-review after every fix pass. **Why the loop exists:** AI review is
+stochastic — each independent pass over the same diff surfaces *different*
+findings. The primary purpose of looping is this **coverage** (shaking out
+issues an earlier pass happened to miss), and only secondarily catching bugs
+the fixes introduced. So a re-review is NOT a narrow sweep of the fix delta —
+it is a **fresh, independent panel pass over the full updated diff**, with
+fix-verification folded in. Adaptive panel sizing (step 5) keeps a genuine
+full re-pass affordable.
 
-**CRITICAL: The re-review is NOT optional.** After fixing findings, you
-MUST re-review at least once. Do not skip it because the fixes "looked
-straightforward" or "were simple." Only a review pass determines when the
-loop is done, not your judgment.
+**CRITICAL: The re-review is NOT optional.** After fixing findings, you MUST
+re-review at least once. Do not skip it because the fixes "looked
+straightforward." Only a review pass determines when the loop is done.
 
-**CRITICAL: Convergence requires a CLEAN review pass.** The loop is ONLY
-done when a review pass returns no new actionable findings. Fixing the
-last batch of findings is NOT convergence. The pattern is always:
-`review → fix → review → fix → review(clean) → the ci skill → done`. You can
-never end on a fix — you must always end on a clean review. The `ci` skill
-runs only after convergence, and if it makes changes, you re-enter the loop.
+**CRITICAL: Convergence requires a CLEAN pass.** The loop is ONLY done when
+an independent panel pass returns no new actionable findings AND every
+applied fix verified. Fixing the last batch is NOT convergence. The pattern
+is always `review → fix → review → fix → review(clean) → done`. You can never
+end on a fix.
 
-### Choose the re-review mode
-
-Compute the fix delta (everything the loop has changed so far — fixes are
-uncommitted, so this is the working-tree diff against HEAD):
+### Prepare the updated diff
 
 ```bash
-git diff HEAD > "$out_dir/delta-iter${N}.patch"
-git diff HEAD --stat | tail -1
 git diff "$parent" > "$out_dir/diff-iter${N}.patch"   # updated full diff
+git diff HEAD --stat | tail -1                          # what the loop changed
 ```
 
-**Escalate to a full panel pass** (re-run steps 4–7 in full on the updated
-full diff, including aggregation and per-finding verification; save its
-report as `review-iter${N}.md` in the original out_dir) only when:
-- the fix delta exceeds ~200 changed lines, OR
-- the fixes touched files that no fixed finding implicated (scope grew).
+Re-pick the lane set with the **step 5 adaptive sizing** rule against the
+updated diff, pointing the reviewer lanes at `diff-iter${N}.patch`.
 
-**Otherwise run delta mode** — the default and the fast path. Spawn, in one
-parallel batch:
+### Formatter-only skip
 
-1. **One fix-verifier subagent per fixed finding.** Each gets the finding,
-   the delta diff path, the full diff path, and the repo root:
+If the only thing that changed since the last reviewed state is the output
+of a deterministic formatter/hook (`cargo fmt`, `yamlfmt`, `prettier`,
+`deno fmt`, …) and that formatter now passes, **do not spawn a review pass
+over it** — formatter output cannot introduce a review-worthy finding. Treat
+that delta as verified by construction and skip to convergence. Confirm the
+change is purely the formatter's doing (re-running the formatter reproduces
+it); if any hand-written line changed, run the full re-pass.
 
-   ```
-   A code review flagged this finding and a fix was applied. Read the
-   current source at the finding's location. Confirm the fix fully
-   resolves the finding — not partially, not by suppressing the symptom —
-   and check the surrounding code for issues the fix may have introduced.
-   Report: fixed (yes/no), rationale, and any new issues caused by or
-   directly adjacent to the fix (in the standard finding format).
-   ```
+### Run the re-review pass
 
-2. **One broad-sweep subagent** over the fix delta:
+Run the **same panel as the first pass** (adaptively sized) over the full
+updated diff, INCLUDING aggregation and per-finding adversarial
+verification. In the same parallel batch, also spawn **one fix-verifier per
+applied fix**:
 
-   ```
-   You are a senior staff engineer reviewing a set of fixes applied in
-   response to a code review. Review the fix delta holistically: bugs,
-   broken invariants, interactions with the rest of the PR, convention
-   violations from the project docs. Apply the same bar as a full
-   review — correctness first, no style nits, nothing the compiler or
-   linter would catch. Use the standard finding format; output
-   "### No findings" if clean.
-   ```
+```
+A code review flagged this finding and a fix was applied. Read the current
+source at the finding's location. Confirm the fix fully resolves the
+finding — not partially, not by suppressing the symptom — and check the
+surrounding code for issues the fix introduced. Report: fixed (yes/no),
+rationale, and any new issues caused by or directly adjacent to the fix
+(standard finding format).
+```
 
-Save all delta outputs to `$out_dir/delta-iter${N}-*.md` (audit trail).
+Save outputs to `$out_dir/review-iter${N}-*.md` (audit trail).
+
+### Overlap CI with the re-review
+
+The re-review and the `ci` skill both read the same working tree and don't
+interact, so launch them **concurrently** after a fix pass. Then gate
+convergence on both: clean re-review + green CI with no CI changes →
+converged; clean re-review + formatter-only CI changes → converged (per the
+formatter-only skip); re-review not clean → ignore the in-flight CI result
+(you'll re-run it next convergence). The `ci` skill's own "amend via
+`gt modify -a` on success" step is overridden by this loop: never amend in
+single-branch mode (hard rule 4 — the user drives version control); in stack
+mode the stack flow amends once per branch after convergence, so ci must not
+amend separately there either.
 
 ### Interpret the result
 
-1. **Clean pass** = every verifier reports fixed with no new issues, and
-   the sweep reports no findings. The loop has converged. Run the `ci`
-   skill to verify all changes compile, pass tests, and satisfy lints.
-   Let the ci loop run until it passes or it asks the user for help.
-   The ci skill's own "amend via `gt modify -a` on success" step is
-   overridden by this loop: never amend in single-branch mode (hard rule
-   4 — the user drives version control); in stack mode the stack flow
-   amends once per branch after convergence, so ci must not amend
-   separately there either.
-   - If the `ci` skill made **no code changes**: proceed to step 13/14.
-   - If it **made code changes** (lint, formatting): run one more delta
-     pass over the new delta. This converges quickly since ci changes are
-     typically mechanical.
-2. **Not clean**: collect unresolved findings (not fixed — re-fix), new
-   issues from verifiers, and sweep findings. Filter out anything
-   substantively identical to a finding already fixed or dismissed
-   (compare file + line range + description). If nothing remains, treat
-   as clean. Otherwise increment the iteration counter and loop back to
-   step 9 (triage) with only the remaining findings.
+1. **Clean** = the panel reports no findings AND every fix-verifier reports
+   fixed with no new issues. Converge per the CI-overlap rules above.
+2. **Not clean**: collect the panel findings, any unresolved fixes (re-fix
+   those), and new issues from the verifiers. Filter out anything
+   substantively identical to a finding already fixed or dismissed (compare
+   file + line range + description) — this is what stops the stochastic
+   passes from re-litigating settled findings forever. If nothing new
+   remains, treat as clean. Otherwise increment the iteration counter and
+   loop back to step 9 (triage) with only the remaining findings.
 
-**Cap at 4 review passes total** (full or delta — initial + up to 3
-re-reviews). If new findings keep appearing after 4 passes, stop and tell
-the user — the fixes are likely introducing as many issues as they solve,
-and a human needs to assess the approach.
+**Cap at 4 review passes total** (initial + up to 3 re-reviews). Because
+re-review is stochastic, hitting the cap usually means findings are thinning
+out, not that fixes are breaking things — but stop and tell the user either
+way: report what each pass found and let a human judge whether the residual
+findings are noise or a real unresolved problem.
 
 Print a status line at the start of each iteration:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Re-review iteration <N> (<delta|full panel>) — checking for new issues
+Re-review iteration <N> (independent full pass, <K> lanes) — stochastic coverage + fix verification
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -1068,9 +1096,10 @@ per-branch summary line, then continue the upstack walk — do not stop here.
   successfully — nothing to loop over.
 - **A fix turns out to be larger than expected:** stop, report progress,
   ask whether to continue, defer to a stacked PR, or dismiss.
-- **Re-review iteration cap hit (3 iterations):** stop and tell the user.
-  Summarize what was fixed in each iteration and what new issues keep
-  appearing. The fixes are likely introducing as many issues as they solve.
+- **Re-review pass cap hit (4 passes):** stop and tell the user. Summarize
+  what each pass found. Because re-review is stochastic, late passes usually
+  surface *thinning* residual findings rather than fix-induced regressions —
+  let a human judge whether what remains is noise or a real problem.
 - **A Linear issue fails to create:** report the exact `linear` error,
   leave the draft tempfile in place, and continue with the rest of the
   deferred items. Ask the user whether to retry the failed one at the end.
@@ -1097,11 +1126,12 @@ per-branch summary line, then continue the upstack walk — do not stop here.
 6. Always re-verify findings against the current source before applying
    fixes — the code may have changed since the review.
 7. Keep fixes surgical. No "while I'm here" cleanups.
-8. Run the compile gate after every fix pass; run the `ci` skill only after
-   the review loop converges clean. If the `ci` skill makes code changes,
-   run another delta pass.
-9. Cap at 4 review passes (full or delta). Convergence requires a clean
-   pass — never end on a fix. Stop and ask the user if you don't converge.
+8. Run the compile gate after every fix pass; launch the `ci` skill
+   concurrently with the re-review (both read the same working tree). If CI
+   makes non-formatter code changes, run another re-review pass over them; a
+   pure-formatter delta is verified by construction and needs no pass.
+9. Cap at 4 review passes. Convergence requires a clean independent pass —
+   never end on a fix. Stop and ask the user if you don't converge.
 10. Spawn all reviewers in a single message with parallel tool calls.
 11. Use `--sandbox read-only` for codex — non-negotiable.
 12. The aggregator is a separate subagent call, never reuse the main session
@@ -1112,6 +1142,7 @@ per-branch summary line, then continue the upstack walk — do not stop here.
     `claude-local-ctx/` if missing.
 16. Validate reviewer output files before passing to aggregator — reject
     files that contain dumped file contents instead of review analysis.
-17. Delta mode is only valid when the fix delta is small (~200 lines) and
-    confined to files implicated by fixed findings — otherwise escalate to
-    a full panel pass.
+17. Re-review is always a fresh INDEPENDENT panel pass over the full updated
+    diff (stochastic coverage), adaptively sized per step 5 — never a narrow
+    fix-delta sweep. The only thing that skips a pass is a verified
+    formatter-only delta.

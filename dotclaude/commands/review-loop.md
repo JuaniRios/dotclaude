@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(codex:*), Bash(linear:*), Bash(cargo:*), Bash(mkdir:*), Bash(cat:*), Bash(mktemp:*), Bash(rm:*), Bash(test:*), Bash(grep:*), Bash(wc:*), Bash(date:*), Bash(basename:*), Bash(find:*), Read, Write, Edit, Agent, Workflow, AskUserQuestion
-description: Cross-review the current branch with a multi-model Workflow panel (2x Fable, Sonnet, 2x Codex gpt-5.5 + inspectors), auto-fix findings, and re-review until clean. Re-review passes use fast delta verification. Loops automatically — only stops for user input on disputed findings or massive changes. Pass `stack` to run the loop across the whole upstack, amending each branch.
+allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(codex:*), Bash(linear:*), Bash(cargo:*), Bash(nix:*), Bash(mkdir:*), Bash(cat:*), Bash(mktemp:*), Bash(rm:*), Bash(test:*), Bash(grep:*), Bash(wc:*), Bash(date:*), Bash(basename:*), Bash(find:*), Read, Write, Edit, Agent, Workflow, AskUserQuestion
+description: Cross-review the current branch with a multi-model Workflow panel (2x Fable, Sonnet, 2x Codex gpt-5.5 + inspectors), auto-fix findings, and re-review until clean. Each re-review is a fresh independent panel pass over the full diff (AI review is stochastic — every pass finds different issues) with fix-verification folded in. Adaptive panel sizing + pipelined verify keep it fast. Loops automatically — only stops for disputed findings or massive changes. Pass `stack` to run across the whole upstack, amending each branch.
 argument-hint: [stack]
 ---
 
@@ -13,12 +13,23 @@ are fixed without asking. The loop re-reviews after each fix pass to catch
 issues introduced by the fixes themselves. It stops when a review pass
 returns no new actionable findings.
 
-**Speed design:** the **first pass** runs the full multi-model panel. Each
-finding is adversarially verified **before** triage so false positives never
-cost a fix-and-re-review cycle. A **compile gate** runs after each fix pass
-so a broken fix never burns a review pass. **Re-review passes** run in fast
-delta mode (per-fix verifiers plus one broad sweep of the fix delta) unless
-the fixes were large enough to warrant re-running the full panel.
+**Why it loops:** AI review is stochastic — each independent pass over the
+same diff surfaces *different* findings. The loop runs **fresh full panel
+passes** (not narrow fix-delta sweeps) so coverage accumulates across passes;
+catching bugs the fixes introduced is a secondary benefit, folded into the
+same pass via fix-verification. It converges when an independent pass returns
+no new actionable findings.
+
+**Speed design:** every finding is adversarially verified **before** triage,
+so false positives never cost a fix-and-re-review cycle. Inside the panel,
+each lane's findings verify the moment that lane finishes (pipelined, no
+barrier waiting on the slowest reviewer), and the report is assembled
+deterministically (no synthesis agent on the critical path). The panel is
+**adaptively sized to the diff** (small diffs run fewer lanes) so a genuine
+full re-pass stays affordable. A **compile gate** runs after each fix pass so
+a broken fix never burns a review pass; a **formatter-only delta** is treated
+as verified by construction and never burns a pass either. `/ci` runs
+**concurrently** with the re-review.
 
 **Argument:** with no argument, the loop runs on the **current branch only**
 and never touches version control (the safe default). With `stack`, it runs
@@ -100,6 +111,14 @@ Verify prerequisites before doing anything:
    git status --porcelain
    ```
    If dirty, tell the user and stop.
+
+4. **Pre-allowlist the commands the workflow agents need.** A non-allowlisted
+   shell/web/MCP call from a lane pauses the whole Workflow mid-run waiting
+   for a permission prompt — on a long fan-out that stalls everything.
+   Before launching, make sure `codex`, `git`, `gh`, `cat`, and `cargo` (and
+   WebFetch, if any lane needs it) are on the allowlist. The frontmatter
+   `allowed-tools` covers the main session; confirm the same commands are
+   permitted for spawned agents.
 
 ## 2. Resolve scope & prepare workspace
 
@@ -365,14 +384,20 @@ assumption (cite the spec, or add the real-response test).
 
 ## 5. Run the review workflow
 
-The whole review pass — fan-out, dedup, adversarial verification, synthesis —
-runs as **one `Workflow` invocation**. Findings come back schema-validated,
-so there is no markdown parsing, no output-file validation, and no separate
-aggregator agent in the main session.
+The whole review pass — fan-out, per-lane adversarial verification, and (on
+re-review passes) fix-verification — runs as **one `Workflow` invocation**.
+Findings come back schema-validated, so there is no markdown parsing and no
+synthesis agent in the workflow; the main session assembles `review.md`
+deterministically from the structured findings (the loop acts on findings,
+not prose, and the ~100s synthesis agent used to sit on the critical path).
+
+The same workflow serves the first pass and every re-review pass — the only
+differences are `fixedFindings` (empty first, this loop's fixes thereafter)
+and the lane set (which may shrink for small diffs, below).
 
 ### Lanes
 
-Build the lane list (drop the codex lanes if `codex` is not on PATH):
+Full lane catalogue (drop the codex lanes if `codex` is not on PATH):
 
 | key                | codex | model  | promptPath                              |
 | ------------------ | ----- | ------ | --------------------------------------- |
@@ -386,8 +411,51 @@ Build the lane list (drop the codex lanes if `codex` is not on PATH):
 | typing-inspector   | no    | sonnet | prompt-typing-inspector.txt             |
 | contract-inspector | no    | fable  | prompt-contract-inspector.txt           |
 
-Each lane object: `{key, codex, model, promptPath, diffPath}`. Normally all
-lanes share `$out_dir/diff.patch`; chunked runs differ (see below).
+Each lane object: `{key, codex, model, promptPath, diffPath, effort?}`.
+`effort` (codex lanes only) defaults to `medium`. Normally all lanes share
+`$out_dir/diff.patch`; chunked runs differ (see below).
+
+### Adaptive panel sizing (by diff size)
+
+A full independent panel runs **every** pass (re-review is for stochastic
+coverage, not just fix-checking — see step 12), so size the panel to the
+diff to keep each pass affordable. Inspectors are always included (9–18s
+each, negligible):
+
+- **< 50 changed lines:** `fable-b` (goal eval) + one codex broad lane +
+  all four inspectors. ~5 lanes.
+- **50–500 lines:** the full catalogue minus one codex lane (`codex-a` and
+  `codex-b` overlap heavily). ~8 lanes.
+- **> 500 lines, or any diff touching security-sensitive paths** (auth,
+  secrets, payment/financial, on-chain, migrations): the full catalogue.
+
+Security-sensitive paths force the full panel regardless of size. When in
+doubt, size up.
+
+### Shared context file
+
+Write one small context file the non-codex lanes read, instead of
+duplicating the diff path / docs / PR description into every lane prompt
+(maximizes prompt-cache reuse across the concurrent lanes — identical base
+prompt + one shared context pointer):
+
+```bash
+cat > "$out_dir/context.txt" <<EOF
+Diff: $out_dir/diff.patch
+Project docs: <CLAUDE.md/AGENTS.md paths, comma-separated>
+PR description (author-written, bot footers stripped):
+<pr_body>
+EOF
+```
+
+### Prewarm (overlap setup with the panel)
+
+Kick the nix dev shells warm in the background while the panel runs, so the
+later `/ci` step doesn't pay cold-shell startup:
+
+```bash
+nix develop .#ci-backend -c true >/dev/null 2>&1 &
+```
 
 ### Workflow invocation
 
@@ -396,24 +464,23 @@ Invoke the `Workflow` tool with the script below via `script`, and `args`:
 ```json
 {
   "repoRoot": "<repo_root>",
-  "docsPaths": ["<CLAUDE.md/AGENTS.md paths>"],
+  "contextPath": "<out_dir>/context.txt",
   "lanes": [ ...lane objects... ],
-  "reportHeader": "# Review — <branch>\n**Commit:** <head_sha>\n**Parent:** <parent_sha> (<parent branch>)\n**Files changed:** <N>\n**Diff size:** <LOC> lines\n**Panel:** 2x Fable, Sonnet, 2x Codex gpt-5.5, 4 inspectors; per-finding verification; Fable synthesis",
-  "synthesisExtra": ""
+  "fixedFindings": []
 }
 ```
 
-The tool result includes a `scriptPath` — reuse it (`{scriptPath, args}`) for
-later full-panel passes instead of resending the script.
+`fixedFindings` is `[]` on the first pass. The tool result includes a
+`scriptPath` — reuse it (`{scriptPath, args}`) for every re-review pass
+instead of resending the script.
 
 ```javascript
 export const meta = {
   name: 'review-panel',
-  description: 'Multi-model review panel: parallel review, dedup, adversarial verify, synthesize',
+  description: 'Independent multi-model review pass over the full diff: per-lane review + adversarial verify (pipelined, no barrier), plus concurrent fix-verification on re-review passes. No synthesis agent — the caller assembles the report deterministically.',
   phases: [
-    { title: 'Review', detail: 'reviewers + inspectors in parallel' },
-    { title: 'Verify', detail: 'adversarial refuter per deduped finding' },
-    { title: 'Synthesize', detail: 'canonical report' },
+    { title: 'Review', detail: 'reviewer lanes; each verifies its own findings as it finishes' },
+    { title: 'Verify fixes', detail: 'confirm each applied fix (re-review passes only)' },
   ],
 }
 
@@ -456,61 +523,115 @@ const VERDICT_SCHEMA = {
   },
 }
 
+const VERIFY_FIX_SCHEMA = {
+  type: 'object',
+  required: ['fixed', 'rationale'],
+  properties: {
+    fixed: { type: 'boolean' },
+    rationale: { type: 'string' },
+    new_issues: { type: 'array', items: FINDING },
+  },
+}
+
 // The harness may deliver args as a JSON-encoded string instead of a
 // parsed object — parse defensively before destructuring.
 const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
-const { repoRoot, docsPaths, lanes, reportHeader, synthesisExtra } = parsedArgs
+// fixedFindings is empty on the first pass and carries this loop's applied
+// fixes on re-review passes. Re-review is a genuine INDEPENDENT panel pass
+// over the full updated diff (stochastic coverage — each pass surfaces
+// different findings), with fix-verification folded in concurrently.
+const { repoRoot, contextPath, lanes, fixedFindings = [] } = parsedArgs
 
-phase('Review')
+// Each lane reviews the FULL diff, then its own findings are adversarially
+// verified immediately — pipeline, NOT a barrier waiting on the slowest
+// reviewer. Cross-lane duplicate findings may be verified more than once;
+// that is far cheaper than a barrier and is deduped afterward. No synthesis
+// agent runs here (it was ~100s on the critical path and the loop consumes
+// structured findings, not prose) — the caller assembles the report.
 
-const laneResults = await parallel(lanes.map(lane => () => {
-  const context = `The diff is at: ${lane.diffPath}\n` +
-    `Project docs: ${docsPaths.join(', ')}\n` +
-    `Repo root: ${repoRoot}`
+const codexPrompt = (lane) =>
+  `Use Bash to run exactly this command (one call, 10 minute timeout):\n` +
+  `cat "${lane.diffPath}" | codex exec --sandbox read-only -m gpt-5.5 ` +
+  `-c model_reasoning_effort="${lane.effort || 'medium'}" -C "${repoRoot}" ` +
+  `"$(cat "${lane.promptPath}")"\n` +
+  `(model_reasoning_effort is turned down from default to cut Codex-lane ` +
+  `latency, which gated the whole review phase. If signed in via ChatGPT ` +
+  `you may also add -c service_tier="fast".) Codex mixes tool-call logs ` +
+  `with the review; the review appears after the last bare 'codex' marker ` +
+  `line in stdout, before any 'tokens used' trailer. If the command fails ` +
+  `with a rate-limit or quota error, retry once with -m o3. Convert the ` +
+  `review into structured findings (parse each ### section into one ` +
+  `finding). If codex is unusable, return an empty findings list and set ` +
+  `reviewer_error.`
 
+const reviewLane = (lane) => {
   const prompt = lane.codex
-    ? `Use Bash to run exactly this command (one call, 10 minute timeout):\n` +
-      `cat "${lane.diffPath}" | codex exec --sandbox read-only -m gpt-5.5 ` +
-      `-C "${repoRoot}" "$(cat "${lane.promptPath}")"\n` +
-      `Codex mixes tool-call logs with the review; the review appears after ` +
-      `the last bare 'codex' marker line in stdout, before any 'tokens used' ` +
-      `trailer. If the command fails with a rate-limit or quota error, retry ` +
-      `once with -m o3. Convert the resulting review into structured ` +
-      `findings (parse each ### section into one finding). If codex is ` +
-      `unusable, return an empty findings list and set reviewer_error.`
+    ? codexPrompt(lane)
     : `Read the review instructions at ${lane.promptPath} and follow them ` +
-      `exactly.\n${context}\nRead the diff, the project docs, and any ` +
-      `source files referenced by the diff that you need for context.`
-
+      `exactly.\nShared review context (diff path, docs paths, PR ` +
+      `description) is at: ${contextPath}\nRepo root: ${repoRoot}\nRead the ` +
+      `diff, the project docs, and any source files referenced by the diff.`
   return agent(prompt, {
-    label: `review:${lane.key}`,
-    phase: 'Review',
-    model: lane.model,
+    label: `review:${lane.key}`, phase: 'Review', model: lane.model,
     schema: REVIEW_SCHEMA,
-  }).then(result => result && ({
+  }).then(result => ({
     key: lane.key,
-    error: result.reviewer_error || null,
-    findings: (result.findings || []).map(finding => ({
-      ...finding,
-      found_by: [lane.key],
-      diff_path: lane.diffPath,
-    })),
+    error: result ? (result.reviewer_error || null) : 'lane died or was skipped',
+    findings: result
+      ? (result.findings || []).map(finding => ({
+          ...finding, found_by: [lane.key], diff_path: lane.diffPath }))
+      : [],
   }))
-}))
+}
 
-const laneErrors = lanes
-  .map((lane, index) => {
-    const result = laneResults[index]
-    if (!result) return `${lane.key}: lane died or was skipped`
-    if (result.error) return `${lane.key}: ${result.error}`
-    return null
-  })
-  .filter(Boolean)
+const verifyLane = (reviewed) =>
+  parallel((reviewed.findings || []).map(finding => () =>
+    agent(
+      `You are adversarially verifying a single code-review finding. Read ` +
+      `the actual code before judging — never judge from the finding text ` +
+      `alone.\n\nFinding: ${JSON.stringify(finding)}\n\nThe diff is at: ` +
+      `${finding.diff_path}\nRepo root: ${repoRoot}\n\nClassify: valid ` +
+      `(real, verified against the code), likely (probably real, needs more ` +
+      `context), disputed (evidence weak), invalid (false positive — the ` +
+      `code contradicts the claim), out-of-scope (real but on lines the diff ` +
+      `did not modify). Refute only with concrete evidence; do not dismiss ` +
+      `uncertain-but-plausible findings. Re-score severity and confidence ` +
+      `from your own reading (confidence 100 = you verified it yourself).`,
+      { label: `verify:${finding.file}`, phase: 'Review', model: 'sonnet',
+        schema: VERDICT_SCHEMA },
+    ).then(verdict => verdict && ({ ...finding, ...verdict }))
+  )).then(verdicts => ({
+    key: reviewed.key, error: reviewed.error,
+    verified: verdicts.filter(Boolean),
+  }))
 
-const raw = laneResults.filter(Boolean).flatMap(result => result.findings)
+const verifyFix = (finding) =>
+  agent(
+    `A code review flagged this finding and a fix was applied:\n` +
+    `${JSON.stringify(finding)}\n\nThe full updated PR diff is at: ` +
+    `${lanes[0].diffPath}\nRepo root: ${repoRoot}\n\nRead the current source ` +
+    `at the finding's location. Confirm the fix fully resolves the finding ` +
+    `— not partially, not by suppressing the symptom — and check the ` +
+    `surrounding code for issues the fix introduced. Report new_issues only ` +
+    `for problems caused by or directly adjacent to the fix.`,
+    { label: `verify-fix:${finding.title}`, phase: 'Verify fixes',
+      model: 'sonnet', schema: VERIFY_FIX_SCHEMA },
+  ).then(result => result && ({ finding, ...result }))
 
+// Panel (pipelined review->verify, no barrier) and fix-verification run
+// concurrently. fixedFindings is [] on the first pass.
+const [laneRows, fixVerifications] = await parallel([
+  () => pipeline(lanes, reviewLane, verifyLane),
+  () => parallel(fixedFindings.map(finding => () => verifyFix(finding))),
+])
+
+const rows = (laneRows || []).filter(Boolean)
+const laneErrors = rows.filter(row => row.error).map(row => `${row.key}: ${row.error}`)
+const allVerified = rows.flatMap(row => row.verified)
+
+// Post-verify dedup: collapse the same finding surfaced by multiple lanes.
 const merged = []
-for (const finding of raw) {
+for (const finding of allVerified) {
   const dup = merged.find(existing =>
     existing.file === finding.file &&
     existing.category === finding.category &&
@@ -525,34 +646,11 @@ for (const finding of raw) {
     merged.push({ ...finding })
   }
 }
-log(`${raw.length} raw findings -> ${merged.length} after dedup; ` +
-  `lane errors: ${laneErrors.length}`)
 
-phase('Verify')
-
-const verified = await parallel(merged.map(finding => () =>
-  agent(
-    `You are adversarially verifying a single code-review finding. Read the ` +
-    `actual code before judging — never judge from the finding text alone.\n\n` +
-    `Finding: ${JSON.stringify(finding)}\n\n` +
-    `The diff is at: ${finding.diff_path}\nRepo root: ${repoRoot}\n\n` +
-    `Classify the finding: valid (real, you verified it against the code), ` +
-    `likely (probably real but needs more context), disputed (evidence is ` +
-    `weak), invalid (false positive — the code contradicts the claim), ` +
-    `out-of-scope (real but on lines the diff did not modify). Refute only ` +
-    `with concrete evidence from the code; do not dismiss ` +
-    `uncertain-but-plausible findings. Re-score severity and confidence ` +
-    `from your own reading (confidence 100 = you verified it yourself).`,
-    { label: `verify:${finding.file}`, phase: 'Verify', model: 'sonnet',
-      schema: VERDICT_SCHEMA },
-  ).then(verdict => verdict && ({ ...finding, ...verdict }))
-))
-
-const judged = verified.filter(Boolean)
-const survivors = judged.filter(finding =>
+const survivors = merged.filter(finding =>
   finding.verdict === 'valid' || finding.verdict === 'likely' ||
   finding.verdict === 'disputed')
-const dismissed = judged.filter(finding =>
+const dismissed = merged.filter(finding =>
   finding.verdict === 'invalid' || finding.verdict === 'out-of-scope')
 
 const sevRank = { critical: 0, high: 1, medium: 2, low: 3, nit: 4 }
@@ -562,44 +660,12 @@ survivors.sort((first, second) =>
   verdictRank[first.verdict] - verdictRank[second.verdict] ||
   second.confidence - first.confidence)
 
-phase('Synthesize')
+const fixes = (fixVerifications || []).filter(Boolean)
+log(`${allVerified.length} verified -> ${survivors.length} survivors, ` +
+  `${dismissed.length} dismissed; lane errors: ${laneErrors.length}; ` +
+  `fix-verifications: ${fixes.length}`)
 
-const synthesis = await agent(
-  `You are a senior staff engineer writing the canonical report for a ` +
-  `multi-reviewer code review. The findings below were already deduplicated ` +
-  `and adversarially verified — do not re-litigate verdicts.\n\n` +
-  `Report header (use verbatim at the top):\n${reportHeader}\n\n` +
-  `Reviewer lanes that errored: ${JSON.stringify(laneErrors)}\n\n` +
-  `Verified findings (JSON, pre-sorted): ${JSON.stringify(survivors)}\n\n` +
-  `Dismissed findings (JSON): ${JSON.stringify(dismissed)}\n\n` +
-  `The diff is at: ${lanes[0].diffPath}. Project docs: ` +
-  `${docsPaths.join(', ')}. Read the diff so your overall assessment ` +
-  `reflects the actual change, and call out anything the reviewers ` +
-  `collectively missed.\n\n` +
-  `Produce a markdown report: the header block, "## Summary" (2-3 sentence ` +
-  `verdict with valid-finding counts per severity), "## Findings" (one ` +
-  `"### [SEVERITY] <title>" section per finding with File, Category, ` +
-  `Validity, Confidence, Found by, Issue, Why it matters, Recommended fix, ` +
-  `and the verifier's rationale as "Verification"), "## Findings dismissed ` +
-  `as invalid" (bulleted, one-line rationale each), "## Findings dismissed ` +
-  `as out-of-scope", "## Overall assessment" (2-3 paragraphs of your own ` +
-  `senior-engineer judgment on merge readiness). No emojis, no apologies, ` +
-  `be decisive.` +
-  (synthesisExtra ? `\n\n${synthesisExtra}` : ''),
-  { label: 'synthesize', phase: 'Synthesize', model: 'fable',
-    schema: {
-      type: 'object',
-      required: ['report_markdown'],
-      properties: { report_markdown: { type: 'string' } },
-    } },
-)
-
-return {
-  findings: survivors,
-  dismissed,
-  laneErrors,
-  report: synthesis ? synthesis.report_markdown : null,
-}
+return { findings: survivors, dismissed, laneErrors, fixVerifications: fixes }
 ```
 
 ### Chunk splitting for large diffs
@@ -626,13 +692,24 @@ user explicitly asks for a single-pass review.
 
 ### After the workflow returns
 
-The workflow returns `{findings, dismissed, laneErrors, report}`.
+The workflow returns `{findings, dismissed, laneErrors, fixVerifications}`.
 
-1. Write `report` to `$out_dir/review.md` and the findings JSON to
-   `$out_dir/findings.json` (audit trail).
-2. If `laneErrors` is non-empty, tell the user which lanes errored. If **all
+1. Write the findings JSON to `$out_dir/findings.json` (audit trail), and
+   assemble `$out_dir/review.md` **deterministically** from the structured
+   fields — no synthesis agent. For each finding emit a
+   `### [SEVERITY] <title>` section with File, Category, Validity,
+   Confidence, Found by, Issue, Why it matters, Recommended fix, and the
+   verifier's rationale as "Verification"; append "## Dismissed as invalid"
+   and "## Dismissed as out-of-scope" bullets from `dismissed`. (Optional:
+   on the **final clean pass only**, you MAY spawn one `fable` agent for a
+   2–3 paragraph "Overall assessment" / "what did reviewers collectively
+   miss" meta-check — it is off the loop's critical path there.)
+2. On re-review passes, `fixVerifications` carries one entry per applied fix
+   (`{finding, fixed, rationale, new_issues}`) — feed it into step 12.
+3. If `laneErrors` is non-empty, tell the user which lanes errored. If **all
    reviewer lanes** errored, stop.
-3. If `findings` is empty, the pass is clean.
+4. If `findings` is empty (and, on re-review passes, every fix verified with
+   no new issues), the pass is clean.
 
 ## 6. (Reserved)
 
@@ -791,6 +868,19 @@ If while implementing a fix you realize it's larger than expected or the
 finding is more nuanced than the report suggests, stop and tell the user.
 Offer to re-triage (defer, dismiss, or adjust the fix).
 
+### Optional: fan out independent fixes
+
+When there are **≥4 fix-now findings whose edits touch disjoint file
+regions**, applying them serially in the main loop is the slow path. Instead
+dispatch them as a small `Workflow`: one agent per finding-cluster (a
+cluster = findings whose `file` + line ranges overlap or are adjacent), each
+agent reading the source and applying its cluster's fix with `Edit`. Use
+`isolation: 'worktree'` only if two clusters touch the same file. The main
+loop then reviews the combined patch instead of authoring every edit. For
+≤3 fixes, or fixes that interact, stay in the main loop — the coordination
+overhead isn't worth it. Either way, the compile gate below still runs on
+the merged result.
+
 ### Compile gate
 
 After all fix-now items are done, run the **compile gate** before any
@@ -803,167 +893,113 @@ convergence.
 
 Then proceed directly to step 12 (re-review).
 
-## 12. Re-review loop (delta mode)
+## 12. Re-review loop (independent full passes)
 
-Re-review after every fix pass to catch issues introduced by the fixes. This
-is the core of the automatic loop.
+Re-review after every fix pass. **Why the loop exists:** AI review is
+stochastic — each independent pass over the same diff surfaces *different*
+findings. The primary purpose of looping is this **coverage** (shaking out
+issues an earlier pass happened to miss), and only secondarily catching bugs
+the fixes introduced. So a re-review is NOT a narrow sweep of the fix delta —
+it is a **fresh, independent panel pass over the full updated diff**, with
+fix-verification folded in. The adaptive panel sizing (step 5) is what keeps
+a genuine full re-pass affordable.
 
-**CRITICAL: The re-review is NOT optional.** After fixing findings, you
-MUST re-review at least once. Do not skip it because the fixes "looked
-straightforward" or "were simple." Only a review pass determines when the
-loop is done, not your judgment.
+**CRITICAL: The re-review is NOT optional.** After fixing findings, you MUST
+re-review at least once. Do not skip it because the fixes "looked
+straightforward." Only a review pass determines when the loop is done.
 
-**CRITICAL: Convergence requires a CLEAN review pass.** The loop is ONLY
-done when a review pass returns no new actionable findings. Fixing the
-last batch of findings is NOT convergence. The pattern is always:
-`review → fix → review → fix → review(clean) → /ci → done`. You can
-never end on a fix — you must always end on a clean review. `/ci` runs
-only after convergence, and if it makes changes, you re-enter the loop.
+**CRITICAL: Convergence requires a CLEAN pass.** The loop is ONLY done when
+an independent panel pass returns no new actionable findings AND every
+applied fix verified. Fixing the last batch is NOT convergence. The pattern
+is always `review → fix → review → fix → review(clean) → done`. You can
+never end on a fix.
 
-### Choose the re-review mode
-
-Compute the fix delta (everything the loop has changed so far —
-fixes are uncommitted, so this is the working-tree diff against HEAD):
+### Prepare the updated diff
 
 ```bash
-git diff HEAD > "$out_dir/delta-iter${N}.patch"
-git diff HEAD --stat | tail -1
 git diff "$parent" > "$out_dir/diff-iter${N}.patch"   # updated full diff
+git diff HEAD --stat | tail -1                          # what the loop changed
 ```
 
-**Escalate to a full panel pass** (re-run steps 4–7 with the updated full
-diff; reuse the workflow `scriptPath`) only when:
-- the fix delta exceeds ~200 changed lines, OR
-- the fixes touched files that no fixed finding implicated (scope grew).
+Update the lanes' `diffPath` to `diff-iter${N}.patch`, rewrite the shared
+`context.txt` to point at it, and re-pick the lane set with the **step 5
+adaptive sizing** rule against the updated diff.
 
-**Otherwise run delta mode** — the default and the fast path. One small
-workflow: a fix-verifier per fixed finding plus one Fable broad sweep of the
-fix delta:
+### Formatter-only skip (R3)
 
-```javascript
-export const meta = {
-  name: 'review-delta',
-  description: 'Verify applied fixes and sweep the fix delta for new issues',
-  phases: [
-    { title: 'Verify fixes', detail: 'one verifier per fixed finding' },
-    { title: 'Sweep', detail: 'broad review of the fix delta' },
-  ],
-}
+If the only thing that changed since the last reviewed state is the output
+of a deterministic formatter/hook (e.g. `cargo fmt`, `yamlfmt`, `prettier`,
+`deno fmt`) and that formatter now passes, **do not spawn a review pass over
+it** — formatter output cannot introduce a review-worthy finding. Treat that
+delta as verified by construction and skip straight to convergence. Confirm
+the change is purely a formatter's doing (the diff matches what re-running
+the formatter produces); if any hand-written line changed, run the full
+re-pass.
 
-const FINDING = {
-  type: 'object',
-  required: ['title', 'severity', 'file', 'line_start', 'line_end', 'category',
-    'finding', 'why_it_matters', 'recommended_fix', 'confidence'],
-  properties: {
-    title: { type: 'string' },
-    severity: { enum: ['critical', 'high', 'medium', 'low', 'nit'] },
-    file: { type: 'string' },
-    line_start: { type: 'integer' },
-    line_end: { type: 'integer' },
-    category: { enum: ['correctness', 'security', 'convention', 'maintainability', 'tests'] },
-    finding: { type: 'string' },
-    why_it_matters: { type: 'string' },
-    recommended_fix: { type: 'string' },
-    confidence: { type: 'integer' },
-  },
-}
+### Run the re-review pass
 
-const VERIFY_FIX_SCHEMA = {
-  type: 'object',
-  required: ['fixed', 'rationale'],
-  properties: {
-    fixed: { type: 'boolean' },
-    rationale: { type: 'string' },
-    new_issues: { type: 'array', items: FINDING },
-  },
-}
+Re-invoke the **same `review-panel` workflow** (reuse its `scriptPath` from
+step 5) with the updated lanes and this loop's fixes:
 
-const SWEEP_SCHEMA = {
-  type: 'object',
-  required: ['findings'],
-  properties: {
-    findings: { type: 'array', items: FINDING },
-    clean_reason: { type: 'string' },
-  },
-}
-
-// The harness may deliver args as a JSON-encoded string instead of a
-// parsed object — parse defensively before destructuring.
-const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
-const { fixedFindings, deltaDiffPath, fullDiffPath, repoRoot, docsPaths } = parsedArgs
-
-const [verifications, sweep] = await parallel([
-  () => parallel(fixedFindings.map(finding => () =>
-    agent(
-      `A code review flagged this finding and a fix was applied:\n` +
-      `${JSON.stringify(finding)}\n\n` +
-      `The fix delta (uncommitted changes) is at: ${deltaDiffPath}\n` +
-      `The full PR diff (context) is at: ${fullDiffPath}\n` +
-      `Repo root: ${repoRoot}\n\n` +
-      `Read the current source at the finding's location. Confirm the fix ` +
-      `fully resolves the finding — not partially, not by suppressing the ` +
-      `symptom — and check the surrounding code for issues the fix may ` +
-      `have introduced. Report new_issues only for problems caused by or ` +
-      `directly adjacent to the fix.`,
-      { label: `verify-fix:${finding.title}`, phase: 'Verify fixes',
-        model: 'sonnet', schema: VERIFY_FIX_SCHEMA },
-    ).then(result => result && ({ finding, ...result })))),
-  () => agent(
-    `You are a senior staff engineer reviewing a set of fixes applied in ` +
-    `response to a code review. The fix delta is at: ${deltaDiffPath}. ` +
-    `The full PR diff (context) is at: ${fullDiffPath}. Project docs: ` +
-    `${docsPaths.join(', ')}. Repo root: ${repoRoot}.\n\n` +
-    `Review the fix delta holistically: bugs, broken invariants, ` +
-    `interactions with the rest of the PR, convention violations from the ` +
-    `project docs. Apply the same bar as a full review — correctness ` +
-    `first, no style nits, nothing the compiler or linter would catch. ` +
-    `Return findings, or an empty list with clean_reason if clean.`,
-    { label: 'delta-sweep', phase: 'Sweep', model: 'fable',
-      schema: SWEEP_SCHEMA }),
-])
-
-return {
-  verifications: (verifications || []).filter(Boolean),
-  sweepFindings: sweep ? sweep.findings : [],
+```json
+{
+  "repoRoot": "<repo_root>",
+  "contextPath": "<out_dir>/context.txt",
+  "lanes": [ ...adaptively-sized lanes, diffPath = diff-iter${N}.patch... ],
+  "fixedFindings": [ ...every finding fixed THIS loop... ]
 }
 ```
 
-Pass `args`: `{fixedFindings: <findings fixed this loop so far>,
-deltaDiffPath, fullDiffPath, repoRoot, docsPaths}`. Reuse the returned
-`scriptPath` on subsequent delta passes.
+The workflow returns `{findings, dismissed, laneErrors, fixVerifications}`:
+the panel's fresh stochastic findings, plus one `fixVerifications` entry per
+applied fix (`{finding, fixed, rationale, new_issues}`).
+
+### Overlap /ci with the re-review (R6)
+
+The re-review and `/ci` both read the same working tree and don't interact,
+so launch them **concurrently** after a fix pass — start `/ci` (invoke the
+`ci` skill) in the background as you fire the re-review workflow. Then gate
+convergence on both:
+
+- Re-review clean **and** `/ci` green, `/ci` made no changes → converged,
+  go to step 14.
+- Re-review clean **and** `/ci` made changes (lint/format) → apply the
+  formatter-only skip above; if the changes are purely formatter output you
+  are converged, otherwise run one more re-pass over the new delta.
+- Re-review **not** clean → ignore the in-flight `/ci` result (you will
+  re-run it next convergence), and proceed to the next bullet.
+
+`/ci`'s own "amend via `gt modify -a` on success" step is overridden by this
+loop: never amend in single-branch mode (hard rule 4 — the user drives
+version control); in stack mode the stack flow amends once per branch after
+convergence, so `/ci` must not amend separately there either.
 
 ### Interpret the result
 
-1. Save the result to `$out_dir/delta-iter${N}.json` (audit trail).
-2. **Clean pass** = every verification has `fixed: true` with no
-   `new_issues`, and `sweepFindings` is empty. The loop has converged.
-   Run `/ci` (invoke the `ci` skill) and let it run until it passes or it
-   asks the user for help. `/ci`'s own "amend via `gt modify -a` on
-   success" step is overridden by this loop: never amend in single-branch
-   mode (hard rule 4 — the user drives version control); in stack mode the
-   stack flow amends once per branch after convergence, so `/ci` must not
-   amend separately there either.
-   - If `/ci` made **no code changes**: proceed to step 13/14.
-   - If `/ci` **made code changes** (lint, formatting): run one more delta
-     pass over the new delta. This converges quickly since `/ci` changes are
-     mechanical.
-3. **Not clean**: collect unresolved findings (`fixed: false` — re-fix),
-   `new_issues`, and `sweepFindings`. Filter out anything substantively
-   identical to a finding already fixed or dismissed (compare file + line
-   range + description). If nothing remains, treat as clean. Otherwise
-   increment the iteration counter and loop back to step 9 (triage) with
-   only the remaining findings.
+1. Save the result to `$out_dir/review-iter${N}.json` (audit trail).
+2. **Clean** = `findings` empty AND every `fixVerifications` entry has
+   `fixed: true` with no `new_issues`. Converge per the /ci-overlap rules
+   above.
+3. **Not clean**: collect the panel `findings`, any `fixed: false`
+   verifications (re-fix those), and `new_issues` from the verifications.
+   Filter out anything substantively identical to a finding already fixed or
+   dismissed (compare file + line range + description) — this is what stops
+   the stochastic passes from re-litigating settled findings forever. If
+   nothing new remains, treat as clean. Otherwise increment the iteration
+   counter and loop back to step 9 (triage) with only the remaining
+   findings.
 
-**Cap at 4 review passes total** (full or delta — initial + up to 3
-re-reviews). If new findings keep appearing after 4 passes, stop and tell
-the user — the fixes are likely introducing as many issues as they solve,
-and a human needs to assess the approach.
+**Cap at 4 review passes total** (initial + up to 3 re-reviews). Because
+re-review is stochastic, hitting the cap usually means findings are
+genuinely thinning out, not that fixes are breaking things — but stop and
+tell the user either way: report what each pass found and let a human judge
+whether the residual findings are noise or a real unresolved problem.
 
 Print a status line at the start of each iteration:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Re-review iteration <N> (<delta|full panel>) — checking for new issues
+Re-review iteration <N> (independent full pass, <K> lanes) — stochastic coverage + fix verification
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -1085,7 +1121,7 @@ Deferred to Linear (1):
 Dismissed (1):
   #5  nit       Rename variable for clarity
 
-Reports: <paths to review.md and delta-iter*.json>
+Reports: <paths to review.md, findings.json, review-iter*.json>
 ```
 
 Then stop. Do not auto-run `gt modify`, `gt submit`, or any other
@@ -1106,8 +1142,10 @@ per-branch summary line, then continue the upstack walk — do not stop here.
 - **A fix turns out to be larger than expected:** stop, report progress,
   ask whether to continue, defer to a stacked PR, or dismiss.
 - **Review pass cap hit (4 passes):** stop and tell the user. Summarize
-  what was fixed in each iteration and what new issues keep appearing. The
-  fixes are likely introducing as many issues as they solve.
+  what each pass found. Because re-review is stochastic, late passes usually
+  surface *thinning* residual findings rather than fix-induced regressions —
+  but let a human judge whether what remains is noise or a real unresolved
+  problem.
 - **The workflow itself fails mid-run:** relaunch with
   `{scriptPath, args, resumeFromRunId}` — completed lanes return cached
   results instantly; only the failed part re-runs.
@@ -1137,23 +1175,27 @@ per-branch summary line, then continue the upstack walk — do not stop here.
 6. Always re-verify findings against the current source before applying
    fixes — the code may have changed since the review.
 7. Keep fixes surgical. No "while I'm here" cleanups.
-8. Run the compile gate after every fix pass; run `/ci` only after the
-   review loop converges clean. If `/ci` makes code changes, run another
-   delta pass.
-9. Cap at 4 review passes (full or delta). Convergence requires a clean
-   pass — never end on a fix. Stop and ask the user if you don't converge.
-10. The review pass runs as a single `Workflow` invocation — never run
-    reviewers sequentially or hand-roll the fan-out with individual Agent
-    calls.
+8. Run the compile gate after every fix pass; launch `/ci` concurrently
+   with the re-review (both read the same working tree). If `/ci` makes
+   non-formatter code changes, run another re-review pass over them; a
+   pure-formatter delta is verified by construction and needs no pass.
+9. Cap at 4 review passes. Convergence requires a clean independent pass —
+   never end on a fix. Stop and ask the user if you don't converge.
+10. Each review/re-review pass runs as a single `Workflow` invocation —
+    never run reviewers sequentially or hand-roll the fan-out with
+    individual Agent calls.
 11. Use `--sandbox read-only` for codex — non-negotiable.
-12. Verification and synthesis happen inside the workflow, never in the
-    main session (context pollution).
+12. Adversarial verification (of findings AND of fixes) happens inside the
+    workflow, never in the main session (context pollution). The report is
+    assembled deterministically in the main session from structured
+    findings — no synthesis agent on the critical path.
 13. Never fabricate findings when a lane errors — record the failure from
     `laneErrors`.
-14. Save `review.md`, `findings.json`, and delta results to `$out_dir`
-    before printing to the terminal.
+14. Save `findings.json`, the assembled `review.md`, and each
+    `review-iter${N}.json` to `$out_dir` before printing to the terminal.
 15. Never silently modify `.gitignore` — ask permission to add
     `claude-local-ctx/` if missing.
-16. Delta mode is only valid when the fix delta is small (~200 lines) and
-    confined to files implicated by fixed findings — otherwise escalate to
-    a full panel pass.
+16. Re-review is always a fresh INDEPENDENT panel pass over the full updated
+    diff (stochastic coverage), adaptively sized per step 5 — never a narrow
+    fix-delta sweep. The only thing that skips a pass is a verified
+    formatter-only delta.
