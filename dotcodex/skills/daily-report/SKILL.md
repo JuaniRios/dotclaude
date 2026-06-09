@@ -5,25 +5,28 @@ description: "Use when the user asks to run the former Claude /daily-report work
 
 # daily-report
 
-Codex adaptation of the Claude slash command `daily-report`. Follow the workflow below, but use Codex-native tools and normal user questions where the original mentions Claude-only mechanisms.
+Codex adaptation of the Claude slash command `daily-report`. Follow the
+workflow below, but use Codex-native tools and normal user questions where
+the original mentions Claude-only mechanisms.
 
 Compatibility notes:
 - Treat `$ARGUMENTS` as the relevant arguments or intent from the user's request.
-- Replace `AskUserQuestion` with a concise question to the user when a decision is required.
-- Replace Claude `Agent` calls with Codex subagents only when the user explicitly asks for parallel agents; otherwise do the work locally.
-- Ignore Claude `allowed-tools`, `argument-hint`, `TodoWrite`, and `Skill` tool references as tool-permission metadata.
-- When the workflow mentions another slash command, use the corresponding Codex skill or follow that workflow directly.
+- Ask the user a concise question directly when a decision is required.
+- Run the collectors via Codex subagents in parallel when available;
+  otherwise run them sequentially in the order given.
+- When the workflow mentions another slash command, use the corresponding
+  Codex skill or follow that workflow directly.
 
 # Daily Report — end-of-day work summary
 
 Generates a comprehensive daily report by aggregating Claude Code sessions,
-git history, GitHub activity, and Telegram conversations across all repos
-in `~/Github/`.
+Codex CLI sessions, git history, GitHub activity, Linear, investigation
+traces, and Telegram conversations across all repos in `~/Github/`.
 
 ## Compressed mode
 
-When invoked as `/daily-report compressed`, produce a much shorter report.
-Still run all the same data collection (Steps 1–2), but in Step 3 compress
+When invoked with the argument `compressed`, produce a much shorter report.
+Still run all the same data collection (Steps 1–3), but in Step 5 compress
 the output to ~10-15 lines max:
 
 - Status section becomes 1 line (🟢/🟡/🔴 + one sentence)
@@ -52,10 +55,13 @@ Logging off for the day. @highonhopium_josh @dcatki
 - 🔴 Merge #642 — prod crashes on non-USDC TakeOrder events
 ```
 
-Then send via Telegram (Step 4) as normal. If the argument is NOT
-"compressed", continue with the full report flow below.
+Then review (Step 4), send via Telegram (Step 6), and save (Step 7) as
+normal. If the argument is NOT "compressed", continue with the full report
+flow below.
 
-## Step 1 — Determine date range
+## Step 1 — Date anchors, pre-flight, and yesterday's report
+
+### Date anchors — compute ONCE, then paste literals everywhere
 
 Use local timezone. If the current local time is before 05:00, treat the
 report as belonging to **yesterday** (the workday hasn't ended yet — the
@@ -64,35 +70,75 @@ user is still wrapping up the previous day's work).
 ```bash
 current_hour=$(date +%H)
 if [ "$current_hour" -lt 5 ]; then
-  today=$(date -v-1d +%Y-%m-%d)
+  REPORT_DATE=$(date -v-1d +%Y-%m-%d)
   echo "Before 5 AM — reporting on previous day"
 else
-  today=$(date +%Y-%m-%d)
+  REPORT_DATE=$(date +%Y-%m-%d)
 fi
-today_start_epoch_ms=$(date -j -f "%Y-%m-%d %H:%M:%S" "$today 00:00:00" +%s)000
-echo "Report date: $today"
-echo "Epoch ms start: $today_start_epoch_ms"
+START_EPOCH_S=$(date -j -f "%Y-%m-%d %H:%M:%S" "$REPORT_DATE 00:00:00" +%s)
+START_EPOCH_MS="${START_EPOCH_S}000"
+START_UTC=$(date -j -u -r "$START_EPOCH_S" +%Y-%m-%dT%H:%M:%SZ)
+PREV_DATE=$(date -j -v-1d -f "%Y-%m-%d" "$REPORT_DATE" +%Y-%m-%d)
+NOW_EPOCH_S=$(date +%s)
+CALENDAR_DATE=$(date +%Y-%m-%d)
+echo "REPORT_DATE=$REPORT_DATE START_EPOCH_S=$START_EPOCH_S START_UTC=$START_UTC"
 ```
 
-## Step 2 — Collect data (run all in parallel using subagents)
+**Hard constraint**: every collector below receives these values as
+LITERAL strings substituted into its instructions. Collectors must never
+call `date` or `datetime.now()` themselves — a 1 AM run would otherwise
+report the wrong day in every section. The local timezone is not UTC, so
+GitHub timestamp comparisons must use `START_UTC`, not the local date
+string.
 
-Work through the collection steps below (in parallel via subagents when
-appropriate). Each returns structured findings. Subagent A additionally
-digests sessions one project at a time — see its section.
+### Pre-flight checks
 
-### subagent A — Claude Code session activity
+Verify every external dependency up front so failures surface immediately
+instead of as silently-empty report sections:
 
-Parse `~/.claude/history.jsonl` to find all entries where `timestamp >=
-$today_start_epoch_ms`. Use python3 for reliable JSONL parsing:
+```bash
+gh auth status >/dev/null 2>&1 && echo "gh: ok" || echo "gh: NOT AUTHENTICATED"
+linear issue mine --no-pager >/dev/null 2>&1 && echo "linear: ok" || echo "linear: FAILED"
+if ! command -v tdl >/dev/null; then echo "tdl: NOT INSTALLED"
+elif ! tdl chat ls >/dev/null 2>&1; then echo "tdl: NOT LOGGED IN"
+else echo "tdl: ok"; fi
+[ -f ~/.config/daily-report-telegram-chats.txt ] && echo "tg chats: configured" || echo "tg chats: NO CONFIG"
+```
+
+- `gh` / `linear` failures: tell the user now; they can fix or accept the
+  degraded report (see Failure modes).
+- `tdl` not logged in: ask the user to run `tdl login` in a terminal,
+  then re-check.
+- Telegram chat config missing (but tdl ok): run `tdl chat ls`, show the
+  chats, ask the user which are work-related, and write
+  `~/.config/daily-report-telegram-chats.txt` — one chat per line (numeric
+  ID or @username), `#` for comments. Do this NOW, not mid-collection.
+
+### Load yesterday's report (continuity)
+
+Reports are saved to `~/Github/dotagents/dotclaude/data/daily-report/reports/`
+as `<date>.html` plus a `<date>.json` sidecar (see Step 7). Load the most
+recent one before `REPORT_DATE`:
+
+```bash
+ls ~/Github/dotagents/dotclaude/data/daily-report/reports/*.json 2>/dev/null | sort | tail -3
+```
+
+Read the latest sidecar dated before `REPORT_DATE` (skip one equal to
+`REPORT_DATE` — that's a re-run). It contains `status`, `action_items`,
+`open_prs`, and `themes`. This feeds Step 4 (carried-over check) and
+Step 5 (continued-vs-new classification, "did pending X ship?"). If no
+prior report exists, note "first run — no continuity data" and move on.
+
+## Step 2 — Discover sessions (inline, no agents)
+
+Scan Claude Code history for the day's sessions — this is one cheap python
+call, run it directly:
 
 ```bash
 python3 -c "
-import json, sys
-from datetime import datetime
-
-today = datetime.now().strftime('%Y-%m-%d')
-start_ts = int(datetime.strptime(today + ' 00:00:00', '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
-
+import json
+start_ts = $START_EPOCH_MS
 sessions = {}
 with open('$HOME/.claude/history.jsonl') as f:
     for line in f:
@@ -102,54 +148,68 @@ with open('$HOME/.claude/history.jsonl') as f:
             continue
         if entry.get('timestamp', 0) >= start_ts:
             sid = entry.get('sessionId', 'unknown')
-            project = entry.get('project', 'unknown')
-            display = entry.get('display', '')
-            if sid not in sessions:
-                sessions[sid] = {'project': project, 'prompts': [], 'first_ts': entry['timestamp']}
-            sessions[sid]['prompts'].append(display)
-
-# Group by project
-by_project = {}
+            s = sessions.setdefault(sid, {'project': entry.get('project', 'unknown'), 'prompts': []})
+            s['prompts'].append(entry.get('display', ''))
 for sid, info in sessions.items():
-    proj = info['project']
-    if proj not in by_project:
-        by_project[proj] = []
-    by_project[proj].append({
-        'session_id': sid,
-        'prompt_count': len(info['prompts']),
-        'first_prompts': info['prompts'][:5],
-        'total_prompts': len(info['prompts'])
-    })
-
-for proj, slist in sorted(by_project.items()):
-    print(f'\n## {proj}')
-    for s in slist:
-        print(f'  Session {s[\"session_id\"][:8]}... ({s[\"total_prompts\"]} prompts)')
-        for p in s['first_prompts']:
-            if p and not p.startswith('/'):
-                print(f'    - {p[:120]}')
+    print(f'{sid}|{info[\"project\"]}|{len(info[\"prompts\"])}')
 " 2>/dev/null
 ```
 
-Then, for each session found, read the corresponding JSONL conversation file
-to understand the full scope of work. Session files live at:
+Then:
 
+1. **Resolve session files by glob** — do NOT try to derive the
+   dash-mangled project directory name (dots are mangled too, not just
+   slashes): `ls ~/.claude/projects/*/<sessionId>.jsonl`
+2. **Normalize project keys**: fold worktrees into their parent repo
+   (`st0x.liquidity-worktrees/pale-quail` → `st0x.liquidity`).
+3. **Group for fan-out**: one summarizer per project; merge projects that
+   only had a single short session into one combined "misc" group. Cap at
+   ~6 summarizer groups.
+4. **Codex day directories**: `~/.codex/sessions/<YYYY>/<MM>/<DD>/` for
+   `REPORT_DATE` — and ALSO for `CALENDAR_DATE` when the two differ (a
+   post-midnight run must scan both).
+
+## Step 3 — Collect (parallel where possible)
+
+Run all collectors: the five fixed ones (git, Linear, GitHub, Codex,
+Telegram) plus one session summarizer per project group from Step 2. Use
+parallel subagents when available; otherwise run them sequentially —
+either way, each collector follows its section below with the Step 1
+literals substituted, and returns its findings as JSON in the stated
+shape. Shape the *facts* (PR numbers, timestamps, issue IDs, ship status)
+strictly so Step 5 can cross-reference mechanically — but keep narrative
+fields free text; forcing the story into rigid enums is how the gist gets
+lost.
+
+Session/Codex collectors return:
+
+```json
+{"summaries": [{"project": "...", "goal": "...", "narrative": "...",
+  "outcome": "...", "ship_status": "shipped|merged_undeployed|in_pr|in_progress|abandoned|ops_only|n/a",
+  "incidents": ["..."], "unresolved": ["..."]}]}
 ```
-~/.claude/projects/<project-path-with-dashes>/<sessionId>.jsonl
-```
 
-Where `<project-path-with-dashes>` is the project path with `/` replaced by
-`-` (e.g., `/Users/juanrios/Github/st0x.liquidity` becomes
-`-Users-juanrios-Github-st0x-liquidity`).
+Git: `{"repos": [{"repo", "branches": [...], "commits": [{"hash",
+"subject", "committed_at"}]}], "traces": [{"slug", "status", "linear",
+"latest"}]}`.
+Linear: `{"issues": [{"id", "title", "state"}], "note": "..."}`.
+GitHub: `{"opened"/"merged"/"reviewed": [{"repo", "number", "title",
+"url", "created_at", "merged_at"}], "issues_closed": [...]}`.
+Telegram: `{"decisions": [...], "asks": [{"ask", "from",
+"addressed_guess"}], "incidents": [...], "commitments": [...],
+"context": [...]}`.
 
-**Digest sessions one project at a time** (the history scan above shows
-which projects had sessions) — fan out one summarizer subagent per project
-when running in parallel. Skimming every session in one pass produces vague
-summaries; each project's sessions deserve a proper digest.
+A collector that fails means that source is unavailable (see Failure
+modes) — never "no activity".
 
-Session files are mostly tool-call noise; never read them raw. Extract just
-the conversation — user messages and assistant text, skipping tool results,
-system reminders, and sub-agent sidechains:
+### Collector — Claude sessions (one per project group)
+
+Each summarizer digests ONLY its own project's sessions (the project key
+and session file paths from Step 2).
+
+Session files are mostly tool-call noise; never read them raw. Extract
+just the conversation — user messages and assistant text, skipping tool
+results, system reminders, and sub-agent sidechains:
 
 ```bash
 python3 -c "
@@ -177,10 +237,22 @@ with open(sys.argv[1]) as fh:
         if not txt or txt.startswith(('<system-reminder', '<command-name',
                 '<local-command-stdout', '<task-notification', 'Caveat:')):
             continue
-        msgs.append((e['type'], txt[:300]))
-if len(msgs) > 60:
-    msgs = msgs[:30] + [('...', f'[{len(msgs)-60} messages elided]')] + msgs[-30:]
-for role, txt in msgs:
+        msgs.append([e['type'], txt[:300]])
+# Long sessions: keep ALL user messages (they mark every direction change)
+# plus the assistant reply just before each, plus the final assistant
+# message. Never blanket-elide the middle — that's where the pivots live.
+if len(msgs) <= 120:
+    keep = msgs
+else:
+    keep = []
+    for i, m in enumerate(msgs):
+        if m[0] == 'user':
+            if i and msgs[i-1][0] == 'assistant' and (not keep or keep[-1] is not msgs[i-1]):
+                keep.append(msgs[i-1])
+            keep.append(m)
+    if msgs[-1][0] == 'assistant' and (not keep or keep[-1] is not msgs[-1]):
+        keep.append(msgs[-1])
+for role, txt in keep:
     print(f'[{role}] {txt}')
 " "$session_file"
 ```
@@ -188,246 +260,136 @@ for role, txt in msgs:
 The gist of a session usually lives in the MIDDLE of the conversation —
 direction changes, discoveries, dead ends, fixes. Never summarize from the
 opening request alone; long sessions often end up doing something different
-from what they started with. Each summary covers, per session:
-- **Goal**: what the user originally asked for
-- **What actually happened**: the narrative, including pivots and discoveries
-- **Outcome**: shipped / in PR / in progress / abandoned — and where
-- **Any production incidents, outages, or manual interventions**
-- **Root causes identified and whether fixes are shipped or still in PRs**
-- **Unresolved threads** worth following up tomorrow
+from what they started with. Return one summary per session: goal, what
+actually happened (narrative including pivots), outcome, ship_status,
+incidents (prod outages, manual interventions, root causes and whether the
+fix shipped or sits in a PR), and unresolved threads worth following up.
 
-### subagent B — Git activity across all repos
+### Collector — Git activity + traces
 
-**IMPORTANT**: This project uses Graphite (`gt`) which frequently amends and
-rebases commits. `git log --since=today` uses the *author date* which does NOT
-change on rebase/amend, so it misses work done today on branches created
-earlier. Use TWO approaches to catch everything:
-
-1. **Reflog-based detection** — `git reflog` records when branch tips move,
-   regardless of commit dates. This catches rebases, amends, and force-pushes.
-2. **Standard git log** — as a fallback for new commits authored today.
+This project uses Graphite (`gt`), which amends and rebases constantly.
+`git log --since` filters on **committer date**, which DOES change on
+amend/rebase — so a single pass catches restacks too. Worktrees share
+refs with the main repo, so no separate worktree loop is needed (it would
+only produce duplicates).
 
 ```bash
-git_email=$(git config user.email 2>/dev/null || echo "")
-today=$(date +%Y-%m-%d)
+git_email=$(git config --global user.email)
 
 for repo in ~/Github/*/; do
-  # Skip non-git directories and worktree container dirs
   if [[ "$repo" == *-worktrees* ]]; then continue; fi
   if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then continue; fi
-
   repo_name=$(basename "$repo")
 
-  # Approach 1: Reflog — find branches updated today (catches amends/rebases)
-  # Shows which branches had their tip moved today
-  updated_branches=$(git -C "$repo" reflog --since="$today 00:00" \
-    --pretty=format:"%D" --all 2>/dev/null | grep -oE 'refs/heads/[^ ,]+' | \
-    sed 's|refs/heads/||' | sort -u)
+  commits=$(git -C "$repo" log --all --since="REPORT_DATE 00:00" \
+    --author="$git_email" --pretty=format:"%h|%s|%cI|%D" 2>/dev/null)
 
-  # Approach 2: Standard git log for commits authored today
-  authored_today=$(git -C "$repo" log --since="$today 00:00" --author="$git_email" \
-    --pretty=format:"%h|%s|%ai" --all 2>/dev/null)
+  # Belt-and-suspenders: reflog records today's branch-tip moves even when
+  # committer dates were preserved (e.g. plain force-push)
+  reflog=$(git -C "$repo" reflog --all --since="REPORT_DATE 00:00" \
+    --format="%gd %gs" 2>/dev/null | \
+    grep -E 'commit|rebase \(finish\)|reset' | head -20)
 
-  if [ -n "$updated_branches" ] || [ -n "$authored_today" ]; then
+  if [ -n "$commits" ] || [ -n "$reflog" ]; then
     echo "### $repo_name"
-
-    if [ -n "$updated_branches" ]; then
-      echo "  Branches pushed/amended today:"
-      echo "$updated_branches" | while read -r branch; do
-        # Show the branch tip commit
-        tip=$(git -C "$repo" log -1 --pretty=format:"%h|%s" "$branch" 2>/dev/null)
-        if [ -n "$tip" ]; then
-          echo "    - $branch: $tip"
-        fi
-      done
-    fi
-
-    if [ -n "$authored_today" ]; then
-      echo "  Commits authored today:"
-      echo "$authored_today" | while IFS='|' read -r hash subject date; do
-        echo "    - [$hash] $subject"
-      done
-    fi
+    [ -n "$commits" ] && echo "$commits"
+    [ -n "$reflog" ] && { echo "  reflog:"; echo "$reflog"; }
     echo ""
   fi
 done
 ```
 
-Also check worktree directories:
+Also check investigation traces updated today (`~/Github/traces/*/TRACE.md`):
 
 ```bash
-for wt_dir in ~/Github/*-worktrees/*/; do
-  if [ ! -d "$wt_dir/.git" ] && [ ! -f "$wt_dir/.git" ]; then continue; fi
-
-  wt_name=$(basename "$(dirname "$wt_dir")")/$(basename "$wt_dir")
-
-  updated_branches=$(git -C "$wt_dir" reflog --since="$today 00:00" \
-    --pretty=format:"%D" --all 2>/dev/null | grep -oE 'refs/heads/[^ ,]+' | \
-    sed 's|refs/heads/||' | sort -u)
-
-  authored_today=$(git -C "$wt_dir" log --since="$today 00:00" --author="$git_email" \
-    --pretty=format:"%h|%s|%ai" --all 2>/dev/null)
-
-  if [ -n "$updated_branches" ] || [ -n "$authored_today" ]; then
-    echo "### $wt_name (worktree)"
-    if [ -n "$updated_branches" ]; then
-      echo "  Branches pushed/amended today:"
-      echo "$updated_branches" | while read -r branch; do
-        tip=$(git -C "$wt_dir" log -1 --pretty=format:"%h|%s" "$branch" 2>/dev/null)
-        if [ -n "$tip" ]; then
-          echo "    - $branch: $tip"
-        fi
-      done
-    fi
-    if [ -n "$authored_today" ]; then
-      echo "  Commits authored today:"
-      echo "$authored_today" | while IFS='|' read -r hash subject date; do
-        echo "    - [$hash] $subject"
-      done
-    fi
-    echo ""
-  fi
-done
-```
-
-### subagent B2 — Trace files (run inside subagent B, not a separate agent)
-
-Check for investigation traces updated today. Traces live at
-`~/Github/traces/*/TRACE.md`. Include this in the git agent's work:
-
-```bash
-today=$(date +%Y-%m-%d)
-
-echo "=== Traces updated today ==="
 for trace_dir in ~/Github/traces/*/; do
   trace_file="$trace_dir/TRACE.md"
-  if [ ! -f "$trace_file" ]; then continue; fi
-
-  # Check if the trace file was modified today (via filesystem mtime)
+  [ -f "$trace_file" ] || continue
   mod_date=$(stat -f "%Sm" -t "%Y-%m-%d" "$trace_file" 2>/dev/null)
-  if [ "$mod_date" = "$today" ]; then
-    slug=$(basename "$trace_dir")
-    # Extract status from frontmatter
-    trace_status=$(grep -m1 '^status:' "$trace_file" | awk '{print $2}')
-    trace_linear=$(grep -m1 '^linear:' "$trace_file" | awk '{print $2}')
-    echo "### $slug"
-    echo "  Status: $trace_status"
-    echo "  Linear: $trace_linear"
-    # Show last 5 timeline entries for context
-    grep -A0 '^\- \*\*' "$trace_file" | tail -5
-    echo ""
+  if [ "$mod_date" = "REPORT_DATE" ]; then
+    echo "### $(basename "$trace_dir")"
+    grep -m1 '^status:' "$trace_file"
+    grep -m1 '^linear:' "$trace_file"
+    grep '^\- \*\*' "$trace_file" | tail -5
   fi
 done
 ```
 
-This reveals which investigations were actively worked on today and their
-current status (active/resolved). Include trace context in the report's
-thematic grouping — traces represent multi-day investigations.
+Traces represent multi-day investigations — report their status and latest
+timeline entries so the synthesis can weave findings into themes.
 
-### subagent C — Linear activity
+### Collector — Linear activity
 
-Use the `linear` CLI to find today's issue activity:
+One query is a superset of completed/started/updated — run it once and
+bucket by state locally:
 
 ```bash
-today=$(date +%Y-%m-%d)
-
-echo "### Issues completed today"
-linear issue mine --state completed --updated-after="$today" --sort priority --team RAI --no-pager 2>/dev/null
-
-echo ""
-echo "### Issues started today"
-linear issue mine --state started --updated-after="$today" --sort priority --team RAI --no-pager 2>/dev/null
-
-echo ""
-echo "### Issues updated today (all states)"
-linear issue mine --all-states --updated-after="$today" --sort priority --team RAI --no-pager 2>/dev/null
+linear issue mine --all-states --updated-after="REPORT_DATE" --sort priority --team RAI --no-pager 2>/dev/null
 ```
 
-For each issue that was completed or started, also get details:
+For the most relevant issues (up to 5), get full context with
+`linear issue view <ID> --no-pager` — status transitions and comments
+added today.
+
+**Fallback if `linear` fails**: grep git commit messages and session data
+for `RAI-\d+` patterns; report as "referenced issues (Linear CLI
+unavailable)" in the `note` field. Better than silently dropping all
+Linear context.
+
+### Collector — GitHub activity
+
+The local timezone is not UTC — always compare against `START_UTC`.
+Search with a one-day-wider date window, then filter precisely in jq.
+`gh search prs --merged` lags the real merge events, so query merged PRs
+per-repo via `gh pr list` (real-time API). Include `createdAt` everywhere
+so Step 5 can compute time-to-merge with zero extra `gh` calls.
 
 ```bash
-# For the most relevant issues (up to 5), get full context
-linear issue view <ID> --no-pager 2>/dev/null
-```
+gh_user=$(gh api user --jq '.login')
 
-This reveals what tickets were worked on, their status transitions, and
-any comments added today.
+echo "### PRs opened"
+gh search prs --author="$gh_user" --created=">=PREV_DATE" \
+  --json title,url,repository,state,createdAt \
+  --jq '.[] | select(.createdAt >= "START_UTC") | "\(.repository.nameWithOwner)|\(.title)|\(.state)|\(.createdAt)|\(.url)"' 2>/dev/null
 
-**Fallback if `linear` CLI fails**: grep all git commit messages and session
-data for `RAI-\d+` patterns. Deduplicate and report as "referenced issues
-(Linear CLI unavailable)". This is better than silently dropping all Linear
-context.
-
-### subagent D — GitHub activity
-
-Use `gh` to find today's PR and issue activity.
-
-**IMPORTANT**: `gh search prs --merged` uses GitHub's search index which can
-lag behind actual merge events (sometimes by hours). For merged PRs, query
-each repo directly via `gh pr list` which hits the real-time repo API. Use
-`gh search` only for opened PRs and closed issues where slight lag is
-acceptable.
-
-```bash
-today=$(date +%Y-%m-%d)
-gh_user=$(gh api user --jq '.login' 2>/dev/null)
-
-echo "### PRs opened today"
-gh search prs --author="$gh_user" --created=">=$today" --json title,url,repository,state \
-  --jq '.[] | "- [\(.repository.nameWithOwner)] \(.title) (\(.state)) — \(.url)"' 2>/dev/null
-
-echo ""
-echo "### PRs merged today (per-repo, real-time)"
+echo "### PRs merged (per-repo, real-time)"
 for repo in ~/Github/*/; do
   if [[ "$repo" == *-worktrees* ]]; then continue; fi
   if [ ! -d "$repo/.git" ] && [ ! -f "$repo/.git" ]; then continue; fi
-
-  # Get the GitHub remote (owner/repo)
-  remote_url=$(git -C "$repo" remote get-url origin 2>/dev/null)
-  if [ -z "$remote_url" ]; then continue; fi
-  # Extract owner/repo from SSH or HTTPS URL (BSD sed compatible)
+  remote_url=$(git -C "$repo" remote get-url origin 2>/dev/null) || continue
   nwo=$(echo "$remote_url" | sed 's|\.git$||' | sed 's|.*[:/]\([^/]*/[^/]*\)$|\1|')
-  if [ -z "$nwo" ]; then continue; fi
-
-  # Query merged PRs authored by user, sorted by most recent
-  merged=$(gh pr list --repo "$nwo" --author "$gh_user" --state merged \
-    --json number,title,mergedAt \
-    --jq ".[] | select(.mergedAt >= \"${today}T00:00:00\") | \"- [$nwo] \(.title) (PR #\(.number))\"" 2>/dev/null)
-
-  if [ -n "$merged" ]; then
-    echo "$merged"
-  fi
+  [ -n "$nwo" ] || continue
+  gh pr list --repo "$nwo" --author "$gh_user" --state merged \
+    --json number,title,createdAt,mergedAt \
+    --jq ".[] | select(.mergedAt >= \"START_UTC\") | \"$nwo|\(.number)|\(.title)|\(.createdAt)|\(.mergedAt)\"" 2>/dev/null
 done
 
-echo ""
-echo "### Issues closed today"
-gh search issues --author="$gh_user" --closed=">=$today" --json title,url,repository \
-  --jq '.[] | "- [\(.repository.nameWithOwner)] \(.title) — \(.url)"' 2>/dev/null
+echo "### PRs reviewed (teammates' work — reviews are reportable work)"
+gh search prs --reviewed-by="$gh_user" --updated=">=PREV_DATE" \
+  --json title,url,repository,author \
+  --jq ".[] | select(.author.login != \"$gh_user\") | \"\(.repository.nameWithOwner)|\(.title)|\(.url)\"" 2>/dev/null
+
+echo "### Issues closed"
+gh search issues --author="$gh_user" --closed=">=PREV_DATE" --json title,url,repository,closedAt \
+  --jq '.[] | select(.closedAt >= "START_UTC") | "\(.repository.nameWithOwner)|\(.title)|\(.url)"' 2>/dev/null
 ```
 
-### subagent E — Codex CLI session activity
+The reviewed-by query is approximate (updated-by-anyone window) — when in
+doubt whether the review actually happened today, check the PR's review
+timestamps before including it.
 
-The user also works through the Codex CLI, which stores its conversations
-separately from Claude Code. Include Codex work so the report reflects
-everything done today, not just Claude Code sessions. Codex keeps two stores:
+### Collector — Codex CLI sessions
 
-1. `~/.codex/history.jsonl` — flat list of user prompts, one JSON object per
-   line with `session_id`, `ts` (epoch **seconds**, not milliseconds), and
-   `text`.
-2. `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` — full session
-   transcripts, organized into per-day directories.
+Codex stores conversations separately. Two stores:
 
-First, find today's Codex sessions and their opening prompts from
-history.jsonl (note `ts` is epoch **seconds**):
+1. `~/.codex/history.jsonl` — user prompts with `session_id`, `ts`
+   (epoch **seconds**), `text`.
+2. `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-*.jsonl` — full transcripts.
 
 ```bash
 python3 -c "
 import json
-from datetime import datetime
-
-today = datetime.now().strftime('%Y-%m-%d')
-start_ts = int(datetime.strptime(today + ' 00:00:00', '%Y-%m-%d %H:%M:%S').timestamp())
-
+start_ts = START_EPOCH_S
 sessions = {}
 with open('$HOME/.codex/history.jsonl') as f:
     for line in f:
@@ -438,40 +400,28 @@ with open('$HOME/.codex/history.jsonl') as f:
         if entry.get('ts', 0) >= start_ts:
             sid = entry.get('session_id', 'unknown')
             sessions.setdefault(sid, []).append(entry.get('text', ''))
-
 for sid, prompts in sessions.items():
-    print(f'\n## Codex session {sid[:8]}... ({len(prompts)} prompts)')
+    print(f'## Codex session {sid[:8]}... ({len(prompts)} prompts)')
     for p in prompts[:5]:
         if p and not p.startswith('/'):
             print(f'    - {p[:120]}')
 " 2>/dev/null
 ```
 
-Then read today's rollout files for full scope. They live under today's
-date directory:
+Then read the rollout files in the day directories from Step 2 (both
+directories when the report date differs from the calendar date). Each
+rollout's first line is `session_meta` with `payload.cwd` (the repo). The
+conversation is in `response_item` lines with `payload.type == "message"`.
+These files are large — extract messages, don't cat:
 
 ```bash
-today_path=$(date +%Y/%m/%d)
-ls ~/.codex/sessions/$today_path/rollout-*.jsonl 2>/dev/null
-```
-
-Each rollout file's first line is a `session_meta` object whose
-`payload.cwd` gives the repo the session ran in — use it to group Codex
-work by project. The conversation lives in `response_item` lines with
-`payload.type == "message"`: `role == "user"` are the user's requests and
-`role == "assistant"` are Codex's actions. These files are large (often
-several MB), so DON'T cat them whole — extract just the messages:
-
-```bash
-today_path=$(date +%Y/%m/%d)
-for f in ~/.codex/sessions/$today_path/rollout-*.jsonl; do
+for f in <each rollout file in the given day dirs>; do
   [ -f "$f" ] || continue
   python3 -c "
 import json, sys
-f = sys.argv[1]
 cwd = None
 msgs = []
-with open(f) as fh:
+with open(sys.argv[1]) as fh:
     for line in fh:
         try: e = json.loads(line)
         except json.JSONDecodeError: continue
@@ -492,44 +442,25 @@ print(f'  ... ({len(msgs)} messages total)')
 done
 ```
 
-Extract the same fields as subagent A (what was asked, what was
-accomplished, whether work is complete, prod incidents, root causes). Feed
-Codex findings into the same thematic synthesis — do NOT separate "Claude
-work" from "Codex work" in the report; the team cares about outcomes
-regardless of which tool produced them. The concrete commits and PRs from
-subagents B and D already capture the shipped work no matter which tool
-authored it; Codex session data is for intent and context.
+Return the same per-session summaries as the Claude session collectors.
+Do NOT separate "Claude work" from "Codex work" downstream — the team
+cares about outcomes, not which tool produced them.
 
-### subagent F — Telegram conversations
+### Collector — Telegram conversations
 
 A lot of work coordination happens in Telegram — decisions, requests from
-teammates, incident chatter, commitments. Read today's messages from
-work-related chats via `tdl` (Telegram MTProto CLI logged into the user's
-own account) so the report reflects this context.
-
-The chat list lives in `~/.config/daily-report-telegram-chats.txt` — one
-chat per line (numeric ID or @username), `#` for comments. If the file is
-missing, run `tdl chat ls`, show the user the chats, ask which are
-work-related, and write the config before continuing.
+teammates, incident chatter, commitments. Export today's messages from the
+configured work chats via `tdl` and parse each export immediately (export
+and parse must live in the same loop — variables set inside a piped
+`while read` subshell don't survive it):
 
 ```bash
-today_start_epoch=$(date -j -f "%Y-%m-%d %H:%M:%S" "$today 00:00:00" +%s)
-now_epoch=$(date +%s)
-
-grep -v '^#' ~/.config/daily-report-telegram-chats.txt 2>/dev/null | \
-while read -r chat; do
-  [ -n "$chat" ] || continue
+for chat in $(grep -v '^#' ~/.config/daily-report-telegram-chats.txt | grep -v '^$'); do
   out="/tmp/tg-export-$(echo "$chat" | tr -c 'A-Za-z0-9' '-').json"
-  tdl chat export -c "$chat" -T time -i "$today_start_epoch,$now_epoch" \
-    --all --with-content -o "$out"
-done
-```
-
-Inspect the first export's schema (`head -c 2000 <file>`) before bulk
-parsing, then extract time, sender (if present), and text per message:
-
-```bash
-python3 -c "
+  tdl chat export -c "$chat" -T time -i "START_EPOCH_S,NOW_EPOCH_S" \
+    --all --with-content -o "$out" 2>/dev/null || { echo "export failed: $chat"; continue; }
+  echo "=== $chat ==="
+  python3 -c "
 import json, sys
 from datetime import datetime
 data = json.load(open(sys.argv[1]))
@@ -542,31 +473,25 @@ for m in data.get('messages', []):
     sender = m.get('from') or m.get('sender') or m.get('from_name') or '?'
     print(f'[{when}] {sender}: {str(txt)[:300]}')
 " "$out"
+done
 ```
 
-From the messages, extract:
+If the parsed output looks wrong, inspect the export schema first
+(`head -c 2000 "$out"`) and adapt the field names. From the messages,
+extract:
+
 - **Decisions made** (and by whom) that explain or redirect today's work
-- **Requests/asks directed at the user** — done, in progress, or still open
-- **Incidents discussed** — corroborate with session/git data for duration
-  and status
+- **Asks directed at the user** — with a guess whether they were addressed
+- **Incidents discussed** — corroborate with session/git data
 - **Commitments the user made** ("I'll ship X tomorrow") → Action Items
-- Context that explains *why* work happened, which sessions alone miss
+- **Context** that explains *why* work happened, which sessions alone miss
 
-Telegram context primarily feeds Status, Action Items, and theme emphasis —
-it's often the source of truth for what the team actually cares about today.
+## Step 4 — User review before writing
 
-If `tdl` is not installed or not logged in, skip this step gracefully and
-note it in the Step 2.5 summary (see Failure modes).
-
-## Step 2.5 — User review before writing
-
-Once all agents return, compile a short summary of what you found and
-present it to the user for review using `ask the user`. This lets the
-user correct emphasis, flag things you missed, or add context you couldn't
-infer from the data (e.g., "prod is currently down", "this issue is the
+Once all collectors return, compile a short summary and present it to the
+user for review. This lets the user correct emphasis, flag misses, or add
+context the data can't show ("prod is currently down", "this issue is the
 most important one").
-
-Format the summary as a bulleted list of proposed themes with key items:
 
 ```
 Here's what I found for today's report:
@@ -580,18 +505,22 @@ Proposed themes:
 - Dashboard + cleanup: PRs #633–635 merged, Schwab/Alpaca removal done
 
 Linear: 7 completed, 3 started
-PRs: 4 opened, 4 merged
+PRs: 4 opened, 4 merged, 2 reviewed
 
-💬 From Telegram: Josh asked for the redemption fix by EOW; agreed to defer
-the dashboard rework; 14:30 incident discussion matches the crash-loop work.
+⏮ From yesterday: 2 of 3 action items addressed (#642 merged ✅);
+"deploy hedge config" still open — carrying it forward.
+
+💬 Telegram asks: Josh asked for the redemption fix by EOW — matching
+work found (PR #641). Dan asked about the dashboard numbers — NO matching
+work today; flag as open?
 
 Are these the main things to talk about? Any corrections on status,
 emphasis, or things I missed?
 ```
 
-Also check PR↔issue coverage. For every PR opened or merged today, check
-if its title or body contains a `RAI-\d+` reference. If any PRs are missing
-a corresponding Linear issue, flag them in the summary:
+Also check PR↔issue coverage: for every PR opened or merged today, check
+whether its title or body contains a `RAI-\d+` reference. Flag PRs missing
+one:
 
 ```
 ⚠️ PRs without a Linear issue:
@@ -599,67 +528,56 @@ a corresponding Linear issue, flag them in the summary:
   → Want me to create a Linear issue and link it?
 ```
 
-If the user says yes, create the Linear issue using the `linear` CLI
-(follow the linear-cli skill rules — draft, show, confirm, then create).
-Then update the PR description to include the new issue ID. Do this before
-proceeding to Step 3.
+If yes, create it via the `linear` CLI (follow the linear-cli skill rules
+— draft, show, confirm, create), then update the PR description with the
+new issue ID. Do this before Step 5.
 
-Wait for the user's response. Incorporate their feedback into the
-synthesis — their input overrides your inferences. For example:
-- If the user says "prod is down" → Status is 🔴, not 🟡
-- If the user says "the issuance fix is most important" → lead with that
-- If the user adds context not in the data → include it
+The user's feedback overrides your inferences ("prod is down" → 🔴; "the
+issuance fix is most important" → lead with it). Only proceed after the
+user confirms. In compressed mode, still review but keep it shorter.
 
-Only proceed to Step 3 after the user confirms or provides corrections.
-In compressed mode, still do this review step but keep the summary shorter.
+## Step 5 — Synthesize the report
 
-## Step 3 — Synthesize the report
-
-Once the user has reviewed and confirmed, synthesize into a single report.
-This is the most important step — you are not just listing outputs, you are
-**connecting dots across data sources** to tell a coherent story.
+This is the most important step — you are not just listing outputs, you
+are **connecting dots across data sources** to tell a coherent story.
 
 ### Synthesis rules
 
-Before writing, answer these questions from the collected data (and the
-user's corrections from Step 2.5):
+Before writing, answer from the collected data (and Step 4 corrections):
 
-1. **System health**: Is anything broken, degraded, or at risk in production
-   right now? Was there a prod incident today? Was it fully resolved (code
-   fix deployed) or only manually patched (fix still in PR)?
-2. **Impact & duration**: If an outage or blind spot was discovered, how long
-   did it last? What's the business impact (e.g., assets not hedged, funds
-   stuck, users affected)?
-3. **Ship status**: For each piece of work, what's the deployment state?
-   Distinguish clearly between:
+1. **System health**: Is anything broken, degraded, or at risk in
+   production right now? Was there an incident today? Fully resolved (code
+   deployed) or only manually patched (fix still in PR)?
+2. **Impact & duration**: How long did an outage or blind spot last?
+   Business impact (assets not hedged, funds stuck, users affected)?
+3. **Ship status** per piece of work:
    - ✅ Merged and deployed to prod
    - 🟡 Merged to main (not yet deployed)
    - 🟠 PR open, in review
    - 🔴 PR open, blocked (CI failing, review requested changes)
    - 🩹 Manually patched in prod (code fix not yet merged)
-4. **Completeness**: Cross-reference Linear issues against git commits and
-   PRs. If issues were completed today, make sure the corresponding work
-   appears in the report. If git commits reference issue IDs not found in
-   Linear data, include them anyway.
+4. **Completeness**: Cross-reference Linear issues against commits and
+   PRs. Completed issues must appear as work; commit-referenced issue IDs
+   missing from Linear data still get included.
+5. **Continuity**: For every item in yesterday's `action_items` and
+   `open_prs`, state what happened — shipped, progressed, or untouched.
+   "Yesterday I said X was pending — did it ship?" is the single thing a
+   manager most wants answered. Unaddressed items carry forward into
+   today's Action Items marked as carried over.
+6. **Telegram asks**: For each ask directed at the user, state whether
+   today's work addressed it. Unaddressed asks become Action Items.
 
 ### Classifying work: new vs continued
 
-Before writing themes, classify each piece of work as **new** or
-**continued** using these signals:
+- **New today**: PR with `created_at >= START_UTC`, new branch with first
+  commit today, Linear issue created today, incident discovered today.
+- **Continued / refined**: PR in yesterday's `open_prs` sidecar or with
+  `created_at < START_UTC` — amended, restacked, or review feedback
+  addressed today. In-progress Linear issue that just moved state.
 
-- **New today**: PR created today, new branch with first commit today,
-  new Linear issue created today, investigation started today, prod
-  incident discovered and triaged today.
-- **Continued / refined**: PR created on a prior day but amended,
-  restacked, or had review feedback addressed today. Branch that existed
-  before today but was rebased or force-pushed. Linear issue that was
-  already in progress and just had status updated.
-
-Key heuristic: check `gh pr view <N> --json createdAt` — if
-`createdAt < today`, it's continued work. If `createdAt >= today`, it's
-new. For work without a PR (e.g., prod ops, config changes), use the
-session context to judge whether this was a new initiative or follow-up
-on prior work.
+The collected `created_at` fields and yesterday's sidecar answer this
+without any extra `gh` calls. For work without a PR (prod ops, config
+changes), judge from session context.
 
 ### Report structure
 
@@ -675,34 +593,35 @@ needs to happen. If all green, say so in one line.}
 
 ✅ <b>What Was Done</b>
 
-{Thematic groups for work that was NEWLY started or created today.
-Each theme gets an emoji + bold name + repo link. 2-4 bullets per
-theme. Lead with OUTCOME not activity. Include root causes for bugs,
-duration for incidents, and deployment state for fixes.}
+{Thematic groups for work NEWLY started or created today. Each theme gets
+an emoji + bold name + repo link. 2-4 bullets per theme. Lead with OUTCOME
+not activity. Include root causes for bugs, duration for incidents, and
+deployment state for fixes. Reviews of teammates' PRs count as work.}
 
 🔄 <b>Continued / Refined</b>
 
-{Work on PRs or branches that existed before today. Keep this concise
-— one bullet per PR/branch, stating what changed (e.g., "addressed
-review feedback", "restacked on latest main", "fixed CI failures").
-No need for full thematic grouping — a flat list is fine here.}
+{Work on PRs or branches that existed before today. One bullet per
+PR/branch, stating what changed ("addressed review feedback", "restacked
+on latest main", "fixed CI failures"). Close the loop on yesterday's
+pending items here or in Status.}
 
 ⚡ <b>Action Items</b>
-{Priority-ordered list. Each item gets a marker:
+{Priority-ordered. Markers:
 - 🔴 Urgent — prod at risk, blocks others, time-sensitive
 - 🟡 Important — should happen soon but not critical
-- 🟢 Normal — review, cleanup, follow-up}
+- 🟢 Normal — review, cleanup, follow-up
+Mark items carried over from a previous day as such.}
 
 📊 <b>Stats</b>
 - <b>PRs opened:</b> {n} — list each with repo
 - <b>PRs merged:</b> {n} — list each with time-to-merge (e.g., "PR #640
-  (7h)", "PR #633 (21h)"). Compute from createdAt→mergedAt via gh API.
+  (7h)"), computed from the collected created_at→merged_at
+- <b>PRs reviewed:</b> {n} (teammates' PRs)
 - <b>Linear issues:</b> {n} completed · {n} started · {n} created
-- <b>PR↔issue coverage:</b> {n}/{total} PRs have a linked Linear issue.
-  Flag any PRs missing a corresponding issue. A PR "has" an issue if
-  its title or body contains a RAI-\d+ reference.
-- <b>Lines changed:</b> +{ins} / -{del} (aggregate across all repos, from
-  git log --shortstat for commits authored today)
+- <b>PR↔issue coverage:</b> {n}/{total} PRs have a linked Linear issue
+  (a RAI-\d+ in title or body); flag the rest
+- <b>Lines changed:</b> +{ins} / -{del} (aggregate, from git log
+  --shortstat for commits authored today)
 - <b>Repos touched:</b> {n} — list repo names with links
 ```
 
@@ -714,10 +633,9 @@ No need for full thematic grouping — a flat list is fine here.}
   "Hedging now covers QQQM, VWO, ARKK — added to prod config" not
   "Added QQQM, VWO, ARKK to prod config."
 - Include root causes for bugs — a manager needs to know if this is a
-  one-off or a systemic issue.
+  one-off or systemic.
 - State incident duration when known: "PPLT/SIVR/IAU had no hedging
-  coverage for 12 days (Apr 24 – May 6)" not just "WebSocket stream
-  died."
+  coverage for 12 days (Apr 24 – May 6)" not just "WebSocket stream died."
 - If a manual fix was applied to prod but the code fix is still in a PR,
   say so explicitly — this is a risk the team needs to track.
 
@@ -733,43 +651,41 @@ Make references clickable using `<a href="...">`:
 
 ### Emoji conventions
 
-- 📋 Title
-- 🚦 Status
-- ✅ What Was Done (new work started today)
-- 🔄 Continued / Refined (prior PRs/branches touched today)
-- 🔧 Bug fix / reliability theme
-- 🏗 Architecture / infrastructure theme
-- 🚀 Feature / capability theme
-- 🧹 Cleanup / tech debt theme
-- 📦 Other / miscellaneous theme
-- ⚡ Action Items
+- 📋 Title · 🚦 Status · ✅ What Was Done · 🔄 Continued / Refined
+- 🔧 Bug fix / reliability theme · 🏗 Architecture / infrastructure theme
+- 🚀 Feature / capability theme · 🧹 Cleanup / tech debt theme
+- 📦 Other / miscellaneous theme · ⚡ Action Items
 
-Pick the most fitting emoji per theme (or use another relevant one if none
-fits). Every `<b>` header gets an emoji prefix.
+Pick the most fitting emoji per theme (or another relevant one). Every
+`<b>` header gets an emoji prefix.
 
-## Step 4 — Confirm, then send via Telegram
+## Step 6 — Confirm, then send via Telegram
 
-Send the report to the user's Telegram "Saved Messages" via the bot API.
-Credentials are in `~/.config/telegram-bot.env` (must contain
-`export TELEGRAM_BOT_TOKEN=...` and `export TELEGRAM_CHAT_ID=...`).
+Send to the user's Telegram "Saved Messages" via the bot API. Credentials
+in `~/.config/telegram-bot.env` (`export TELEGRAM_BOT_TOKEN=...` and
+`export TELEGRAM_CHAT_ID=...`).
 
-1. Write the report text to `/tmp/daily-report.txt` using Telegram HTML
-   formatting (see formatting rules below).
-2. **Always show the full message and wait for explicit confirmation before
-   sending.** Print the complete report inline exactly as it will appear in
-   Telegram, then ask the user directly to approve or request changes and
-   wait for a clear yes. Do NOT run the send command until the user has
-   explicitly approved this run's message. If they request changes, edit
-   `/tmp/daily-report.txt`, show the updated message, and ask again — repeat
-   until approved. This applies in compressed mode too.
-3. Once approved, send it:
+1. Write the report to `/tmp/daily-report-1.txt` using Telegram HTML
+   formatting. **Escape literal `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`
+   in all non-tag text** (error messages and code like `Vec<u8>` will
+   otherwise 400 the whole send).
+2. If the report exceeds ~4000 characters (Telegram's limit is 4096),
+   split on section boundaries into `/tmp/daily-report-2.txt` etc.
+3. **Always show the full message and wait for explicit confirmation
+   before sending.** Print the complete report inline exactly as it will
+   appear, then ask the user directly to approve or request changes and
+   wait for a clear yes. Do NOT send until explicitly approved this run.
+   If they request changes, edit, re-show, re-ask. This applies in
+   compressed mode too.
+4. Once approved, send each part in order:
 
 ```bash
 source ~/.config/telegram-bot.env
+for part in /tmp/daily-report-*.txt; do
 python3 -c "
-import os, urllib.request, urllib.parse, json
+import os, sys, urllib.request, urllib.parse, json
 
-with open('/tmp/daily-report.txt') as f:
+with open(sys.argv[1]) as f:
     text = f.read()
 
 token = os.environ['TELEGRAM_BOT_TOKEN']
@@ -784,113 +700,136 @@ data = urllib.parse.urlencode({
 req = urllib.request.Request(url, data)
 resp = json.load(urllib.request.urlopen(req))
 if resp.get('ok'):
-    print('Sent to Telegram')
+    print('Sent: ' + sys.argv[1])
 else:
     print(f'Telegram error: {resp}')
-"
+" "$part"
+done
 ```
 
-4. Print a brief confirmation ("Report sent to Telegram Saved Messages.").
+5. On an HTML-parse 400, show the exact Telegram error, fix the offending
+   entity, and re-confirm — or offer a plain-text resend (drop
+   `parse_mode`). Never retry blind: each successful send is permanent.
+6. Print a brief confirmation ("Report sent to Telegram Saved Messages.").
 
 ### Telegram HTML formatting rules
 
-Use Telegram's HTML parse mode — it's more reliable than MarkdownV2:
+Use Telegram's HTML parse mode — more reliable than MarkdownV2:
 - `<b>text</b>` for section headers and theme names
 - `<a href="...">text</a>` for Linear issues and repo names (see
-  Hyperlinks section above)
+  Hyperlinks above)
 - `<code>text</code>` only for inline code (function names, endpoints,
   error messages) — NOT for repo names or issue IDs
 - Plain `-` for bullets
 - Link PRs to Graphite: `<a href="https://app.graphite.dev/github/pr/<org>/<repo>/<number>">PR #N</a>`
-- No special escaping needed (except `<`, `>`, `&` which are rare in reports)
+- Escape literal `&`, `<`, `>` in text as HTML entities
 
-Do NOT save the report to a permanent file unless the user asks.
+## Step 7 — Save the report
+
+After a successful send, persist for tomorrow's continuity:
+
+```bash
+mkdir -p ~/Github/dotagents/dotclaude/data/daily-report/reports
+```
+
+1. Save the exact sent message(s) to
+   `~/Github/dotagents/dotclaude/data/daily-report/reports/<REPORT_DATE>.html`
+2. Write the sidecar
+   `~/Github/dotagents/dotclaude/data/daily-report/reports/<REPORT_DATE>.json`:
+
+```json
+{
+  "date": "<REPORT_DATE>",
+  "status": "🟡 prod patched, fix in PR #642",
+  "action_items": [
+    {"text": "Merge #642 — prod crashes on non-USDC TakeOrder", "severity": "urgent", "carried_over": false}
+  ],
+  "open_prs": [{"repo": "st0x.liquidity", "number": 642, "title": "..."}],
+  "themes": ["Prod crash-loop fix", "Issuance recovery"]
+}
+```
+
+If a report for the same date exists, overwrite it (it's a re-run).
+Confirm: `Report saved: .../reports/<REPORT_DATE>.html (+ sidecar)`.
 
 ## Hard rules
 
-1. Always use the local timezone for "today" — not UTC.
+1. **One set of date anchors**: compute `REPORT_DATE` / `START_EPOCH_S` /
+   `START_EPOCH_MS` / `START_UTC` / `PREV_DATE` once in Step 1 and
+   substitute literals into every collector. Collectors never call `date`
+   or `datetime.now()`. Local timezone for "today"; `START_UTC` for any
+   GitHub timestamp comparison.
 2. Never read session JSONL files raw — they are huge and mostly tool-call
-   noise. Always extract user + assistant text with the message extractor,
-   which caps output per session.
-3. Thematic grouping over flat lists — cluster related work, never dump raw
-   commit messages.
-4. If `gh` or `linear` is not authenticated or fails, skip that section
-   gracefully and note it in the report. For `linear`, fall back to
-   extracting issue IDs from git commit messages and session data.
+   noise. Always use the message extractor; for long sessions keep all
+   user messages (plus adjacent assistant replies), never blanket-elide
+   the middle.
+3. Thematic grouping over flat lists — cluster related work, never dump
+   raw commit messages.
+4. If `gh` or `linear` fails pre-flight, tell the user immediately; if
+   they proceed, skip that section gracefully and note it in the report.
+   For `linear`, fall back to extracting `RAI-\d+` IDs from commits and
+   sessions.
 5. If no activity is found for the day, say so clearly — don't fabricate.
-6. Include worktree activity — the user works across multiple worktrees of
-   the same repo.
+6. Worktree sessions and branches belong to their parent repo — fold
+   `<repo>-worktrees/<name>` into `<repo>` everywhere. No separate
+   worktree git scan (worktrees share refs with the main checkout).
 7. Keep the report concise: aim for one screen (40-60 lines).
-8. Write the entire report in first person ("I fixed...", "I investigated...")
-   — this is pasted directly into a team group chat.
-9. Never mention internal tooling or process in the output. This includes:
-   Claude Code sessions, Codex CLI sessions, JSONL files, AI tooling,
-   Telegram exports, traces, cross-reviews,
-   feedback-reviews, review loops, slash commands, skills, sub-agents, or
-   any other implementation detail of how the work was done. These are
-   input sources for understanding what was accomplished — the team only
-   cares about outcomes, not process. Write about *what* was done and *why*,
-   never *how* (e.g., "addressed PR review comments" not "ran
-   the feedback-review skill"; "investigated and root-caused the bug" not "updated
-   trace RAI-280"; "reviewed the fix" not "ran cross-review with 3 agents").
-10. Always include Linear issue IDs (e.g., RAI-280) when referencing tickets.
-11. If investigation traces were updated today, weave the investigation
-    findings into the relevant theme naturally (e.g., "Root-caused the
-    Fireblocks timeout — ..."). Never use the word "trace" in the output.
-12. The report is sent via Telegram bot using HTML parse mode. Use
-    `<b>` for headers and theme names, `<a href>` links for Linear issues,
-    repo names, and PR numbers (linking to Graphite), `<code>` only for
-    inline code, and plain `-` for bullets.
-13. **Production risk awareness**: Pay close attention to whether prod is
-    currently functional or actively broken. Key signals from session data:
-    crash-loops, error logs, manual restarts, "prod is down" mentions,
-    events that trigger crashes repeatedly. If prod is actively crashing
-    or down, Status is 🔴 — not 🟡. If a manual patch was applied but the
-    root cause still triggers (e.g., a recurring event type that crashes
-    the bot), prod is still 🔴 because it will crash again. Only use 🟡
-    when prod is running but the fix is unmerged and the trigger is rare
-    or unlikely. Never report a manual patch as "fixed" — it's "stabilized,
-    fix pending in PR #X" (🟡) or "still crashing, fix in PR #X" (🔴).
-14. **Cross-reference all data sources**: Don't report each agent's data in
-    isolation. Connect Linear issues to PRs to git commits. If a Linear
-    issue was completed but no corresponding PR appears, investigate. If a
-    PR was merged but the corresponding Linear issue isn't marked done,
-    note the discrepancy.
-15. **State incident duration**: When a bug or outage is discovered, always
-    state how long it lasted if the data is available (e.g., from log
-    timestamps, git history, or session conversations).
-16. **Never send before approval**: Always show the user the full composed
-    message and get explicit confirmation before calling the Telegram send
-    command. The send is irreversible — the bot can't edit or delete prior
-    messages, so a premature send means a duplicate the user has to clean up.
-    Wait for an explicit "send it" on every run, including compressed mode.
+8. Write the entire report in first person ("I fixed...",
+   "I investigated...") — it's pasted directly into a team group chat.
+9. Never mention internal tooling or process in the output: Claude Code
+   sessions, Codex CLI sessions, JSONL files, AI tooling, Telegram
+   exports, traces, cross-reviews, feedback-reviews, review loops, slash
+   commands, skills, sub-agents, or any other implementation detail.
+   These are input sources — the team only cares about outcomes. Write
+   *what* was done and *why*, never *how* ("addressed PR review comments"
+   not "ran the feedback-review skill").
+10. Always include Linear issue IDs (e.g., RAI-280) when referencing
+    tickets.
+11. If investigation traces were updated today, weave the findings into
+    the relevant theme naturally ("Root-caused the Fireblocks timeout —
+    ..."). Never use the word "trace" in the output.
+12. The report is sent via Telegram bot using HTML parse mode: `<b>` for
+    headers, `<a href>` links for Linear issues / repos / PRs (Graphite),
+    `<code>` only for inline code, plain `-` bullets, entities for
+    literal `&` `<` `>`.
+13. **Production risk awareness**: if prod is actively crashing or down,
+    Status is 🔴 — not 🟡. If a manual patch was applied but the root
+    cause still triggers, prod is still 🔴 because it will crash again.
+    Only use 🟡 when prod runs and the trigger is rare. Never report a
+    manual patch as "fixed" — it's "stabilized, fix pending in PR #X".
+14. **Cross-reference all data sources**: connect Linear issues to PRs to
+    commits to Telegram asks. Completed issue with no PR → investigate.
+    Merged PR with issue not marked done → note the discrepancy.
+15. **State incident duration** whenever the data allows (log timestamps,
+    git history, session conversations).
+16. **Never send before approval**: show the full composed message and get
+    an explicit "send it" on every run, including compressed mode. The
+    send is irreversible.
 17. **Telegram is context, not content**: Telegram messages inform the
-    synthesis (decisions, asks, incidents, commitments) but are never quoted
-    verbatim or attributed to teammates in the report. Synthesize outcomes;
-    don't expose the chat log.
+    synthesis (decisions, asks, incidents, commitments) but are never
+    quoted verbatim or attributed to teammates in the report.
+18. **Always save the report + sidecar** (Step 7) after a successful send
+    — tomorrow's report depends on it.
 
 ## Failure modes
 
-- **No sessions today**: Report says "No Claude Code sessions found for
-  today" and proceeds with git/GitHub data only.
-- **No Codex sessions today**: Skip the Codex section silently and rely on
-  Claude Code sessions plus git/GitHub data. If `~/.codex/history.jsonl` or
-  `~/.codex/sessions/` is missing, treat it the same as no activity.
-- **`gh` not authenticated**: Skip GitHub section, add a note: "GitHub
-  activity skipped (gh not authenticated)".
-- **`linear` not authenticated or fails**: Fall back to extracting issue
-  IDs (e.g., `RAI-\d+`) from git commit messages and session text. Report
-  these as "referenced issues" and note: "Linear CLI unavailable — issue
-  statuses not verified."
-- **No git repos found**: Report focuses on session activity only.
-- **history.jsonl missing**: Fall back to scanning session JSONL files by
+- **No Claude sessions today**: proceed with the other collectors; say so
+  in the Step 4 summary.
+- **No Codex sessions today** (or `~/.codex/` missing): skip silently.
+- **`gh` not authenticated**: caught in pre-flight; if proceeding, note
+  "GitHub activity skipped (gh not authenticated)".
+- **`linear` fails**: fall back to `RAI-\d+` extraction from commits and
+  sessions; note "Linear CLI unavailable — issue statuses not verified."
+- **`tdl` not installed**: skip Telegram; note "Telegram context skipped
+  (tdl not installed — add it via nix-darwin and run `tdl login`)."
+- **`tdl` not logged in**: caught in pre-flight; ask the user to run
+  `tdl login` in a terminal, re-check, otherwise skip Telegram.
+- **Telegram chat config missing**: pre-flight runs `tdl chat ls`, asks
+  the user which chats are work-related, writes
+  `~/.config/daily-report-telegram-chats.txt`, then proceeds.
+- **A collector fails**: treat that source as unavailable and note it —
+  never as "no activity".
+- **No prior report sidecar**: first run — skip continuity, note it.
+- **history.jsonl missing**: fall back to scanning session JSONL files by
   modification date (`find ~/.claude/projects -name '*.jsonl' -newer
   <today-sentinel>`).
-- **`tdl` not installed**: Skip the Telegram step; note in the Step 2.5
-  summary: "Telegram context skipped (tdl not installed — add it via
-  nix-darwin and run `tdl login`)."
-- **`tdl` not logged in / auth error**: Skip Telegram; ask the user to run
-  `tdl login` in a terminal, then offer to re-run the Telegram step.
-- **Telegram chat config missing**: Run `tdl chat ls`, ask the user which
-  chats are work-related, write `~/.config/daily-report-telegram-chats.txt`,
-  then proceed.
