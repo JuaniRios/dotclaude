@@ -1125,6 +1125,24 @@ Dismissed (1):
 Reports: <paths to review.md, findings.json, review-iter*.json>
 ```
 
+Below the summary block, add two prose sections:
+
+**What changed** — for each fixed finding, a short paragraph describing the
+change actually applied, not just the finding title: what the code does now
+versus before, any public API impact (added/removed/renamed items), tests
+added or modified, and any design decision made between competing fix
+options (name the option chosen and why). If a fix made the PR description,
+docs, or comments stale, call that out explicitly so the user can update
+them before submitting.
+
+**Suggested Linear issues** — findings that were NOT fixed but are worth
+tracking: dismissed-as-out-of-scope findings that are real, disputed
+findings whose fix was too large for this PR, and auto-dismissed low/nit
+findings you judge worth a follow-up. One line each (severity, title, why
+it's worth tracking), then offer to draft them via the step-13 flow if the
+user wants. Never create an issue without the per-issue confirmation from
+step 13. Omit the section when there are no candidates.
+
 Then stop. Do not auto-run `gt modify`, `gt submit`, or any other
 mutation — the user decides when to amend and push.
 
