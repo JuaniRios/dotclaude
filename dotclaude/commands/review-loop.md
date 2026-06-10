@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(codex:*), Bash(linear:*), Bash(cargo:*), Bash(nix:*), Bash(mkdir:*), Bash(cat:*), Bash(mktemp:*), Bash(rm:*), Bash(test:*), Bash(grep:*), Bash(wc:*), Bash(date:*), Bash(basename:*), Bash(find:*), Read, Write, Edit, Agent, Workflow, AskUserQuestion
-description: Cross-review the current branch with a multi-model Workflow panel (2x Fable, Sonnet, 2x Codex gpt-5.5 + inspectors), auto-fix findings, and re-review until clean. Each re-review is a fresh independent panel pass over the full diff (AI review is stochastic — every pass finds different issues) with fix-verification folded in. Adaptive panel sizing + pipelined verify keep it fast. Loops automatically — only stops for disputed findings or massive changes. Pass `stack` to run across the whole upstack, amending each branch.
+description: Cross-review the current branch with a multi-model Workflow panel (Fable, 2x Sonnet, 2x Codex gpt-5.5 + inspectors), auto-fix findings, and re-review until clean. Each re-review is a fresh independent panel pass (AI review is stochastic — every pass finds different issues) with fix-verification folded in; on chunked runs only changed chunks get the full panel. Adaptive panel sizing + pipelined verify keep it fast. Loops automatically — only stops for disputed findings or massive changes. Pass `stack` to run across the whole upstack, amending each branch.
 argument-hint: [stack]
 ---
 
@@ -401,15 +401,25 @@ Full lane catalogue (drop the codex lanes if `codex` is not on PATH):
 
 | key                | codex | model  | promptPath                              |
 | ------------------ | ----- | ------ | --------------------------------------- |
-| fable-a            | no    | fable  | prompt-fable-a.txt (concurrency)        |
+| fable-a            | no    | sonnet | prompt-fable-a.txt (concurrency)        |
 | fable-b            | no    | fable  | prompt-fable-b.txt (goal evaluation)    |
 | sonnet             | no    | sonnet | prompt-sonnet.txt (error handling)      |
 | codex-a            | yes   | —      | prompt-codex-a.txt (edge cases)         |
 | codex-b            | yes   | —      | prompt-codex-b.txt (broad sweep)        |
 | test-inspector     | no    | sonnet | prompt-test-inspector.txt               |
-| rust-inspector     | no    | fable  | prompt-rust-inspector.txt               |
+| rust-inspector     | no    | sonnet | prompt-rust-inspector.txt               |
 | typing-inspector   | no    | sonnet | prompt-typing-inspector.txt             |
 | contract-inspector | no    | fable  | prompt-contract-inspector.txt           |
+
+**Fable allocation:** Fable is reserved for exactly two lanes — `fable-b`
+(goal evaluation) and `contract-inspector` — because those are the lanes
+where it has demonstrably found unique high-severity issues (intent-vs-
+implementation gaps, unpinned external assumptions at money boundaries)
+that no Sonnet or Codex lane caught. Fable burns usage limits ~5x faster
+per token than Sonnet, so every other lane runs on Sonnet (or Codex, which
+does not count against Anthropic limits at all). Do not promote lanes back
+to Fable for "thoroughness" — measured runs show repeated Fable generalists
+mostly duplicate what Sonnet/Codex lanes find.
 
 Each lane object: `{key, codex, model, promptPath, diffPath, effort?}`.
 `effort` (codex lanes only) defaults to `medium`. Normally all lanes share
@@ -691,6 +701,21 @@ lines.
 Skip chunking for diffs under 3,500 lines, single-directory diffs, or if the
 user explicitly asks for a single-pass review.
 
+**Chunked re-review passes (changed chunks only at full strength).** The
+full per-chunk panel applies only to the FIRST pass. On re-review passes,
+compare each chunk's regenerated patch against the previous iteration's
+(`cmp -s chunk-X-iter${N}.patch chunk-X-iter$((N-1)).patch`):
+
+- **Changed chunks** get the full five-lane panel — fix regressions live
+  here, and this is where repeated Fable/Sonnet generalists keep earning.
+- **Unchanged chunks** get the two codex lanes only. Measured runs show the
+  late-pass stochastic discoveries on untouched code come almost entirely
+  from the diverse-model lanes (codex + contract-inspector), while re-run
+  Fable/Sonnet generalists just re-find what they already found.
+- Inspector lanes (including the Fable contract-inspector) still run once
+  per pass on the full diff, so unchanged chunks keep their
+  external-contract sweep.
+
 ### After the workflow returns
 
 The workflow returns `{findings, dismissed, laneErrors, fixVerifications}`.
@@ -924,7 +949,10 @@ git diff HEAD --stat | tail -1                          # what the loop changed
 
 Update the lanes' `diffPath` to `diff-iter${N}.patch`, rewrite the shared
 `context.txt` to point at it, and re-pick the lane set with the **step 5
-adaptive sizing** rule against the updated diff.
+adaptive sizing** rule against the updated diff. On chunked runs, also apply
+the **changed-chunks-only** rule from step 5: regenerate the per-chunk
+patches, full panel only for chunks whose patch differs from the previous
+iteration, codex lanes only for unchanged chunks.
 
 ### Formatter-only skip (R3)
 

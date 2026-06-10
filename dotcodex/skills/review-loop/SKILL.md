@@ -1,6 +1,6 @@
 ---
 name: review-loop
-description: "Cross-review the current branch with Codex reviewers, optionally add one or two Claude CLI reviewers, adversarially verify findings before fixing, auto-fix, and re-review until clean. Each re-review is a fresh independent panel pass over the full diff (AI review is stochastic — every pass finds different issues) with fix-verification folded in; adaptive panel sizing keeps it fast. Stops only for disputed findings or large changes. Pass `stack` in $ARGUMENTS to run the loop across the whole upstack, amending each branch."
+description: "Cross-review the current branch with Codex reviewers, optionally add one or two Claude CLI reviewers, adversarially verify findings before fixing, auto-fix, and re-review until clean. Each re-review is a fresh independent panel pass over the full diff (AI review is stochastic — every pass finds different issues) with fix-verification folded in; adaptive panel sizing keeps it fast; on chunked runs only changed chunks get the full panel. Stops only for disputed findings or large changes. Pass `stack` in $ARGUMENTS to run the loop across the whole upstack, amending each branch."
 ---
 
 # review-loop
@@ -379,6 +379,13 @@ Suggested lanes:
 
 - **Claude A**: `$out_dir/prompt-claude-a.txt` (goal evaluation & domain logic)
 - **Claude B**: `$out_dir/prompt-claude-b.txt` (error handling & failure modes)
+  — run this lane with `--model sonnet`
+
+At most ONE Claude lane (the goal-evaluation one) may run on the premium
+default model: measured runs show the goal-evaluation focus is where the
+premium Claude model finds unique high-severity issues, while additional
+premium lanes mostly duplicate Codex/Sonnet findings and burn the Anthropic
+usage limit ~5x faster per token than Sonnet.
 
 ```bash
 cat "$out_dir/diff.patch" | claude -p \
@@ -487,6 +494,20 @@ lines.
 
 Skip chunking for diffs under 3,500 lines, single-directory diffs, or if the
 user explicitly asks for a single-pass review.
+
+**Chunked re-review passes (changed chunks only at full strength).** The
+full per-chunk reviewer set applies only to the FIRST pass. On re-review
+passes, regenerate the per-chunk patches and compare each against the
+previous iteration's (`cmp -s chunk-X-iter${N}.patch
+chunk-X-iter$((N-1)).patch`):
+
+- **Changed chunks** get the full reviewer set — fix regressions live here.
+- **Unchanged chunks** get one broad-sweep reviewer only. Measured runs show
+  late-pass stochastic discoveries on untouched code come almost entirely
+  from diverse-lens lanes (broad sweep, contract inspection), while
+  re-running the full panel just re-finds what it already found.
+- Inspector lanes still run once per pass on the full diff, so unchanged
+  chunks keep their external-contract sweep.
 
 ### Output validation
 
@@ -890,7 +911,10 @@ git diff HEAD --stat | tail -1                          # what the loop changed
 ```
 
 Re-pick the lane set with the **step 5 adaptive sizing** rule against the
-updated diff, pointing the reviewer lanes at `diff-iter${N}.patch`.
+updated diff, pointing the reviewer lanes at `diff-iter${N}.patch`. On
+chunked runs, also apply the **changed-chunks-only** rule from step 5: full
+reviewer set only for chunks whose patch differs from the previous
+iteration, one broad-sweep reviewer for unchanged chunks.
 
 ### Formatter-only skip
 
