@@ -321,8 +321,8 @@ Build the lane list (drop the codex lanes if `codex` is not on PATH — check
 
 **Fable allocation:** Fable is reserved for `fable-b` (goal evaluation) and
 `contract-inspector` — the lanes where it has demonstrably found unique
-high-severity issues; it burns usage limits ~5x faster per token than
-Sonnet, so everything else runs on Sonnet or Codex. The codex lanes' model
+high-severity issues; it burns usage limits ~3x faster per token than
+Sonnet (2x Opus), so everything else runs on Sonnet or Codex. The codex lanes' model
 applies to the WRAPPER agent that shells out to the codex CLI and parses
 its output — pin it to sonnet, or it inherits the (possibly premium)
 session model for trivial wrapper work.

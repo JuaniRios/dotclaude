@@ -415,8 +415,8 @@ Full lane catalogue (drop the codex lanes if `codex` is not on PATH):
 (goal evaluation) and `contract-inspector` — because those are the lanes
 where it has demonstrably found unique high-severity issues (intent-vs-
 implementation gaps, unpinned external assumptions at money boundaries)
-that no Sonnet or Codex lane caught. Fable burns usage limits ~5x faster
-per token than Sonnet, so every other lane runs on Sonnet (or Codex, which
+that no Sonnet or Codex lane caught. Fable burns usage limits ~3x faster
+per token than Sonnet (2x Opus), so every other lane runs on Sonnet (or Codex, which
 does not count against Anthropic limits at all). Do not promote lanes back
 to Fable for "thoroughness" — measured runs show repeated Fable generalists
 mostly duplicate what Sonnet/Codex lanes find. The codex lanes' model
