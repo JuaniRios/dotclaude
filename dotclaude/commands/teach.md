@@ -50,6 +50,11 @@ moving on to the next stage, confirm that they have mastered everything in the
 current one. Cover both the high level (e.g. motivation) and the low level
 (e.g. business logic, edge cases).
 
+**Always show progress.** Begin every stage and every question with a
+`Stage N/<total>` header (e.g. `Stage 4/7`) so the user always knows where they
+are and how much remains. The `<total>` is the number of stages on the
+checklist; if the checklist grows, update the total and say so.
+
 To gauge where they're at, proactively have them restate their understanding
 first. Then help them fill in the gaps from there — they might ask you
 questions or ask you to ELI5, ELI14, or ELII (explain like they're an intern).
