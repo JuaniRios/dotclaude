@@ -31,6 +31,27 @@ a broken fix never burns a review pass; a **formatter-only delta** is treated
 as verified by construction and never burns a pass either. `/ci` runs
 **concurrently** with the re-review.
 
+**Where it runs & context discipline:** the `Workflow` tool exists only in
+the main session — subagents cannot invoke it (and ToolSearch cannot load it
+there), so this command always runs in the main session. **Never wrap the
+loop in an orchestrator subagent** — the panel engine would be lost, and
+hand-rolling the fan-out with Agent calls is forbidden (hard rule 10). What
+keeps a premium (Fable/Opus) session cheap instead is delegation of the
+remaining context-heavy steps to closing `sonnet` subagents, so source
+files, prompt text, and report prose never enter the expensive main context:
+
+- **Prompt building (step 4)** — a setup subagent authors the prompt files.
+- **Report assembly (step 5)** — a subagent renders `review.md` from
+  `findings.json`.
+- **Fix application (step 11)** — a fixer subagent reads sources and applies
+  each pass's fixes; the main session never reads source files.
+
+The main session keeps only glue commands, the Workflow invocations, triage
+over structured findings, and user checkpoints. On a cheap model
+(Sonnet/Haiku) inlining these steps is fine — per-subagent overhead can
+exceed the savings on small diffs — but a caller may instruct delegation
+regardless of model (`/issue-stack` does, to keep its babysitter tiny).
+
 **Argument:** with no argument, the loop runs on the **current branch only**
 and never touches version control (the safe default). With `stack`, it runs
 across the **entire upstack** — current branch and every branch above it —
@@ -180,6 +201,15 @@ their context and can mislead the goal-evaluation lane.
 
 Every reviewer gets a **shared base prompt** plus a **per-reviewer focus
 paragraph** that biases each toward a different class of bugs.
+
+**Premium-session delegation:** on Fable/Opus (or when the caller asked for
+delegation), do not author these files in the main session. Spawn one
+**setup subagent** (`Agent`, `model: sonnet`) with this command file's path,
+`$out_dir`, the chosen lane keys, the project-docs paths, and the stripped
+PR description; it writes `prompt-base.txt`, every `prompt-{reviewer}.txt`,
+the inspector prompts, and the step-5 `context.txt` exactly per this step,
+and returns only the list of paths written. On cheap models, write them
+inline as described below.
 
 ### Base prompt
 
@@ -732,7 +762,10 @@ The workflow returns `{findings, dismissed, laneErrors, fixVerifications}`.
    and "## Dismissed as out-of-scope" bullets from `dismissed`. (Optional:
    on the **final clean pass only**, you MAY spawn one `fable` agent for a
    2–3 paragraph "Overall assessment" / "what did reviewers collectively
-   miss" meta-check — it is off the loop's critical path there.)
+   miss" meta-check — it is off the loop's critical path there.) On premium
+   sessions, delegate the rendering: write `findings.json` yourself (the
+   structured findings are already in the tool result), then spawn a
+   `sonnet` subagent to assemble `review.md` from it per the format above.
 2. On re-review passes, `fixVerifications` carries one entry per applied fix
    (`{finding, fixed, rationale, new_issues}`) — feed it into step 12.
 3. If `laneErrors` is non-empty, tell the user which lanes errored. If **all
@@ -876,6 +909,16 @@ Plan:
 
 ## 11. Fix-now loop
 
+**Premium-session delegation:** on Fable/Opus (or when the caller asked for
+delegation), do not apply fixes in the main session. Spawn one **fixer
+subagent** (`Agent`, `model: sonnet`) per fix pass with the full JSON of the
+fix-now findings, the repo root, and the project-docs paths, instructed to
+execute substeps 1–6 below for each finding in severity order and then run
+the compile gate, returning a one-line summary per fix plus the compile-gate
+result. The main session never reads source files. The ≥4-disjoint-fixes
+Workflow fan-out below still applies when it qualifies. On cheap models,
+apply the fixes inline.
+
 For each "fix now" finding, in severity order:
 
 1. Announce which one you're addressing.
@@ -913,7 +956,9 @@ the merged result.
 ### Compile gate
 
 After all fix-now items are done, run the **compile gate** before any
-re-review: the project's fastest typecheck scoped to what was touched (for
+re-review (when fixes were delegated, the fixer subagent runs it and reports
+the result — only re-run it in the main session if anything was applied
+inline afterwards): the project's fastest typecheck scoped to what was touched (for
 Rust, `cargo check -p <touched crates>`; otherwise the project's equivalent).
 Fix any compile errors immediately — never enter a re-review pass with code
 that doesn't compile; that wastes an entire review pass. The compile gate is
@@ -1249,3 +1294,9 @@ per-branch summary line, then continue the upstack walk — do not stop here.
     diff (stochastic coverage), adaptively sized per step 5 — never a narrow
     fix-delta sweep. The only thing that skips a pass is a verified
     formatter-only delta.
+17. This command runs only where the `Workflow` tool exists — the main
+    session. Never run it inside a subagent and never wrap it in an
+    orchestrator subagent. On premium models (or on caller instruction),
+    delegate prompt building, report assembly, and fix application to
+    closing `sonnet` subagents (steps 4, 5, 11); the Workflow invocations,
+    triage, and user checkpoints always stay in the main session.

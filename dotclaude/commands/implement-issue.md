@@ -1,25 +1,31 @@
 ---
-allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(linear:*), Bash(codex:*), Bash(mkdir:*), Bash(mktemp:*), Bash(cat:*), Bash(rm:*), Bash(test:*), Bash(basename:*), Bash(date:*), Bash(sleep:*), Bash(sed:*), Read, Write, Edit, Skill, Agent, AskUserQuestion, TodoWrite
-description: Take a Linear issue from link to finished implementation — open a skeleton Graphite PR, cross-link Linear↔PR, plan via a Sonnet subagent critiqued by Codex + Fable, implement and review via closing subagents (keeps main-session context small), submit the stack, and get CI green.
+allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(linear:*), Bash(codex:*), Bash(cargo:*), Bash(nix:*), Bash(mkdir:*), Bash(mktemp:*), Bash(cat:*), Bash(rm:*), Bash(test:*), Bash(basename:*), Bash(date:*), Bash(sleep:*), Bash(sed:*), Bash(grep:*), Bash(wc:*), Bash(find:*), Read, Write, Edit, Skill, Agent, Workflow, AskUserQuestion, TodoWrite
+description: Take a Linear issue from link to finished implementation — open a skeleton Graphite PR, cross-link Linear↔PR, plan via a Sonnet subagent critiqued by Codex + Fable, implement via closing subagents, review via /review-loop in the main session (its Workflow panel only exists there; heavy steps delegated internally), submit the stack, and get CI green.
 argument-hint: <issue-link-or-number>
 ---
 
 Drive a Linear issue end-to-end: read it, open a skeleton PR on top of the
 stack, cross-link Linear and the PR, plan it via a subagent (critiqued by
-Codex + Fable, approved by the user), implement and self-review via
-subagents, submit the stack, and get CI green.
+Codex + Fable, approved by the user), implement via a subagent, self-review
+via `/review-loop` in the main session (its heavy steps delegated to
+subagents), submit the stack, and get CI green.
 
 **Context discipline:** all heavy work (research, planning, implementation,
-review, description) runs in subagents that close when done — the main
-session holds only glue commands and user checkpoints. This is what keeps
-long sessions cheap; never pull research or diffs into the main context.
+fix application) runs in subagents that close when done — the main session
+holds only glue commands and user checkpoints. This is what keeps long
+sessions cheap; never pull research or diffs into the main context. The one
+exception is `/review-loop`: its panel engine is the `Workflow` tool, which
+exists only in the main session, so the review runs here — but review-loop
+delegates its own heavy steps (prompt building, report assembly, fixes) to
+closing subagents, so only structured findings enter this session.
 
 `$ARGUMENTS` is the Linear issue link or number (e.g. `RAI-799` or a
 `linear.app/...` URL). If empty, ask the user for it before doing anything.
 
 Track the phases with `TodoWrite` so the user can see progress. The phases are:
 read issue → open skeleton PR → cross-link → plan (subagent + critics) →
-implement (subagent) → review & describe (subagent) → submit & CI → report.
+implement (subagent) → review & describe (main session, delegated
+internals) → submit & CI → report.
 
 ---
 
@@ -146,26 +152,29 @@ step 2):
 gt modify -a
 ```
 
-## 7. Review & describe via a review subagent
+## 7. Review & describe (main session, delegated internals)
 
-Spawn a **review subagent** that runs the whole quality pass and closes:
+`/review-loop`'s panel engine is the `Workflow` tool, which exists only in
+the main session — a subagent cannot invoke it, so the review must NOT be
+wrapped in a subagent. Run it here, leaning on review-loop's own context
+discipline (it pushes prompt building, report assembly, and all fix
+application into closing `sonnet` subagents, so source files never enter
+this session):
 
 1. Invoke the `review-loop` skill (current branch, no `stack` argument) with
    this standing instruction: *decide most fix/decision calls yourself; for a
-   finding that genuinely has no clear answer, do not ask — collect it in
-   your report instead.*
+   finding that genuinely has no clear answer, do not ask mid-loop — collect
+   it for the end. Use your premium-session delegations (steps 4, 5, 11)
+   regardless of session model.*
 2. After the loop converges, amend the fixes: `gt modify -a`. **This must
    happen before the description** — `/pr-description` reads the committed
    `parent..HEAD` diff, so unamended fixes would be invisible to it.
 3. Invoke the `pr-description` skill for the **real** description: What and
    How from the actual diff, Why preserved from the Linear issue with its
    markdown hyperlink. It runs its own Codex gate and pushes automatically.
-4. Return: review passes run, findings fixed/dismissed, ambiguous findings
-   collected in step 1, and the final PR title.
-
-If the subagent returned ambiguous findings, resolve them with the user now
-(`AskUserQuestion`, batched). Apply any chosen fixes via a small Sonnet
-subagent, then `gt modify -a` again.
+4. Resolve any collected ambiguous findings with the user now
+   (`AskUserQuestion`, batched). Apply chosen fixes via a small Sonnet
+   subagent, then `gt modify -a` again.
 
 ## 8. Submit the stack & get CI green (`/ci-fix`)
 
@@ -206,10 +215,12 @@ Tell the user implementation is finished. Print:
 3. The Linear issue must be a markdown hyperlink in the PR body, and the PR URL
    must be attached to the Linear issue — both directions, every time.
 4. Assignee is `JuaniRios`; reviewers are `0xgleb` and `findolor`.
-5. Heavy work (research, planning, implementation, review, description) runs
-   in subagents that close when done — never in the main session. Pin the
-   planner/implementer/review subagents to `sonnet`; the plan critics are
-   exactly one Fable subagent + one Codex CLI pass.
+5. Heavy work (research, planning, implementation, fix application) runs in
+   subagents that close when done — never in the main session. `/review-loop`
+   and `/pr-description` run in the main session (the `Workflow` tool is
+   unavailable inside subagents) but delegate their heavy lifting internally.
+   Pin the planner/implementer/fixer subagents to `sonnet`; the plan critics
+   are exactly one Fable subagent + one Codex CLI pass.
 6. The skeleton description (step 3) may be auto-approved since it's an
    explicit WIP placeholder; the final description is gated by
    `/pr-description`'s Codex review pass and pushed automatically — show the

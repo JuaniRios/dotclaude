@@ -1,6 +1,6 @@
 ---
-allowed-tools: Bash(git:*), Bash(gt:*), Bash(gh:*), Bash(linear:*), Bash(mkdir:*), Bash(cat:*), Bash(tail:*), Bash(test:*), Bash(mktemp:*), Bash(rm:*), Bash(sleep:*), Read, Write, Agent, Skill, AskUserQuestion, TodoWrite
-description: Cheap-model babysitter that implements a whole stack of Linear issues. Runs on Sonnet; for each issue in order it mirrors /implement-issue autonomously via closing subagents — one Sonnet subagent plans (Codex + Fable critique the plan) and implements, a second runs /review-loop then /pr-description, the main loop amends + gt ss + waits for CI, then starts the next issue from scratch stacked on top. Never spawns headless `claude -p` sessions (they bill as extra usage); subagents stay inside the subscription session.
+allowed-tools: Bash(git:*), Bash(gt:*), Bash(gh:*), Bash(linear:*), Bash(codex:*), Bash(cargo:*), Bash(nix:*), Bash(mkdir:*), Bash(cat:*), Bash(tail:*), Bash(test:*), Bash(mktemp:*), Bash(rm:*), Bash(sleep:*), Bash(grep:*), Bash(wc:*), Bash(date:*), Bash(find:*), Bash(basename:*), Read, Write, Agent, Skill, Workflow, AskUserQuestion, TodoWrite
+description: Cheap-model babysitter that implements a whole stack of Linear issues. Runs on Sonnet; for each issue in order it mirrors /implement-issue autonomously via closing subagents — one Sonnet subagent plans (Codex + Fable critique the plan) and implements; the main loop then runs /review-loop (its Workflow panel exists only in the main session) with all heavy steps delegated to subagents, runs /pr-description, amends + gt ss + waits for CI, then starts the next issue from scratch stacked on top. Never spawns headless `claude -p` sessions (they bill as extra usage); subagents stay inside the subscription session.
 argument-hint: <issue-1> <issue-2> [issue-3 ...]
 ---
 
@@ -84,21 +84,27 @@ steps 5–6 end-to-end with no approval gate:
 
 Main loop afterwards: `gt modify -a`.
 
-### Step 3 — Review & describe subagent
+### Step 3 — Review & describe (main loop, delegated internals)
 
-Spawn a **second subagent** (`Agent`, `model: sonnet`) instructed to follow
-`/implement-issue` step 7 with full autonomy:
+`/review-loop`'s panel engine is the `Workflow` tool, which exists only in
+the main session — a subagent cannot run it, so the review happens in YOUR
+loop. Keep your context tiny by forcing review-loop's delegations:
 
-1. Run `/review-loop` (current branch, no `stack` arg) deciding **every**
-   finding itself — never escalate; log genuinely ambiguous calls to the
-   issue log instead. Do not create Linear issues (that needs user
-   confirmation) — log defer-worthy findings to the issue log.
+1. Invoke the `review-loop` skill (current branch, no `stack` arg) with this
+   standing instruction: *decide every finding yourself — never escalate;
+   log genuinely ambiguous calls to the issue log instead. Do not create
+   Linear issues (that needs user confirmation) — log defer-worthy findings
+   to the issue log. Use your premium-session delegations (steps 4, 5, 11)
+   regardless of session model — never read source files or diffs in the
+   main session.*
 2. `gt modify -a` after convergence — **before** the description, because
    `/pr-description` reads the committed `parent..HEAD` diff.
-3. Run `/pr-description` (final description; its Codex gate replaces user
-   confirmation; it pushes automatically).
-4. Append the review summary to the issue log, return passes/fixes/title,
-   and close.
+3. Invoke the `pr-description` skill (final description; its Codex gate
+   replaces user confirmation; it pushes automatically).
+4. Append the review summary to the issue log.
+
+Structured findings and triage tables will enter your context — expected
+and cheap on Sonnet. Source code, diffs, and prompt text must not.
 
 ### Step 4 — Submit & CI (main loop)
 
@@ -138,7 +144,9 @@ When all issues are done (or the stack stopped early), report:
 ## Hard rules
 
 1. You babysit; subagents implement. Never edit code, review diffs, fix CI,
-   or resolve conflicts in the main loop.
+   or resolve conflicts in the main loop. (`/review-loop` runs in your loop
+   only because `Workflow` exists nowhere else — its delegations keep all
+   source reading and fixing in its subagents.)
 2. **Never `claude -p` or any headless session** — extra-usage billing.
    Subagents only.
 3. Sequential only — one issue, one subagent at a time (they share the
@@ -162,6 +170,5 @@ When all issues are done (or the stack stopped early), report:
   retry `gt ss` once, then stop the stack if still conflicted.
 - **CI never green (3 rounds):** stop the stack, leave the branch and log in
   place, report exactly what is failing.
-- **Review-loop doesn't converge (its 4-pass cap):** the review subagent
-  reports it; log the residual findings and stop the stack — a
-  non-converging branch is not a safe base.
+- **Review-loop doesn't converge (its 4-pass cap):** log the residual
+  findings and stop the stack — a non-converging branch is not a safe base.
