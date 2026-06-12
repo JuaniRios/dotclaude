@@ -96,11 +96,15 @@ issue identifier and stop until they provide it.
     Use `gt create` instead of `gt modify` when creating the first commit for a
     new branch.
 
-12. Watch CI.
+12. Watch CI for the pushed HEAD (the run whose `headSha` matches
+    `git rev-parse HEAD`, not merely the newest run on the branch).
     - If CI passes, move the Linear issue to the appropriate done/review state
       according to repo instructions.
     - If CI fails, use `ci-fix`, amend with Graphite, resubmit, and keep
-      watching the newest run.
+      watching the run for the new HEAD.
+    - If no run ever appears for this HEAD (~90s), Graphite skipped CI for this
+      branch (6th+ in the stack). Run the full local CI matrix (`nix run .#ci`)
+      as the gate instead; never accept a stale run from an earlier commit.
 
 13. Final report.
     Include the issue ID, branch, PR link, verification performed, CI status,

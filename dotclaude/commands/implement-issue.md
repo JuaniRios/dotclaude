@@ -182,20 +182,30 @@ Submit and wait for the GitHub CI run to finish:
 
 ```bash
 gt ss
+git rev-parse HEAD   # the SHA whose run you must wait for
 gh run list --branch "$(git branch --show-current)" --limit 1 \
-  --json databaseId,status,conclusion
+  --json databaseId,status,conclusion,headSha
 ```
 
 (If the stack is shared with someone else's upstack work, use `gt submit` on
 current + downstack only — see the `graphite` skill.)
 
-Poll until the run's `status` is `completed` (sleep ~30s between checks; report
-progress). Then:
+Poll until the run whose `headSha` equals the pushed HEAD reaches
+`status: completed` (sleep ~30s between checks; report progress). **Only a run
+matching this HEAD counts** — a stale run from an earlier commit is not this
+branch's verification. Then:
 
 - **If it passed**: continue to step 9.
 - **If it failed**: invoke the `ci-fix` skill to diagnose and fix locally. It
   amends via `gt modify -a` when done. Re-submit (`gt ss`) and re-poll. Repeat
   until CI is green (cap at a few rounds; if stuck, stop and report).
+- **If no run ever appears for this HEAD** (~90s of retries with only stale
+  `headSha`s): Graphite caps CI at the first 5 PRs in a stack, so a 6th-or-deeper
+  branch gets no run. Fall back to the **full local CI matrix** on this branch —
+  `nix run .#ci` — and treat its result as the gate (failures → `/ci-fix`, re-run
+  until clean). Note in the report that this branch was verified locally because
+  Graphite skipped its CI. (The `enable-remote-checks` poller already encodes
+  this as exit code 2 if you reuse it.)
 
 ## 9. Report
 
@@ -228,4 +238,6 @@ Tell the user implementation is finished. Print:
 7. In `/review-loop`, the subagent decides most findings itself — genuinely
    ambiguous ones come back as a report for the user, never as a mid-loop
    question.
-8. Don't declare done until CI is actually green.
+8. Don't declare done until CI is actually green — the remote run for this exact
+   HEAD, or, when Graphite skipped CI (6th+ in the stack), a full local
+   `nix run .#ci` pass. Never accept a stale run from a different commit as green.

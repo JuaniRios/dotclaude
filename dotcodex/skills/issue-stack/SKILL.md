@@ -59,10 +59,14 @@ before starting.
      policy.
    - Run review before submission for substantive code.
    - Submit with Graphite.
-   - Poll CI for the current commit.
+   - Poll CI for the current commit — the run whose `headSha` matches the pushed
+     HEAD, not just the newest run on the branch. If no run appears for this HEAD
+     (~90s), Graphite skipped CI for this branch (6th+ in the stack); run the
+     full local CI matrix (`nix run .#ci`) as the gate instead.
    - Do not start the next issue until the current issue is submitted and its
-     required checks are green, unless the user explicitly authorizes parallel
-     CI risk.
+     required checks are green (remote run for this HEAD, or the local matrix
+     when Graphite skipped CI) — never a stale run from an earlier commit —
+     unless the user explicitly authorizes parallel CI risk.
 
 5. Handle failures.
    - If CI fails, use `ci-fix` and resubmit the same branch.

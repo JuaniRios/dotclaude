@@ -109,14 +109,21 @@ and cheap on Sonnet. Source code, diffs, and prompt text must not.
 ### Step 4 — Submit & CI (main loop)
 
 `gt modify -a` if the tree is dirty (e.g. formatter output), then `gt ss`.
-Wait for CI without burning turns: run
-`gh run watch <run-id> --exit-status` via Bash with `run_in_background:
-true` — you are re-invoked when it finishes.
+Capture the pushed HEAD (`git rev-parse HEAD`) and wait for **the run whose
+`headSha` matches it** — not merely the newest run on the branch. Reuse the
+`enable-remote-checks` background poller (it already matches headSha and exits
+2 when none appears); run it with `run_in_background: true` so you are
+re-invoked when it finishes.
 
-- **Green** → Step 5.
+- **Green** (run for this HEAD passed) → Step 5.
 - **Red** → spawn a fix subagent that invokes `/ci-fix` (it diagnoses,
   fixes, and amends), then `gt ss` and re-watch. Cap at 3 rounds; still red
   → **stop the whole stack** and report.
+- **No run for this HEAD** (poller exit 2): Graphite caps CI at the first 5 PRs
+  in a stack, so this branch (6th+) gets none. Spawn a subagent to run the
+  **full local CI matrix** (`nix run .#ci`) as the gate; green → Step 5, failures
+  → `/ci-fix` subagent then re-run the local matrix (same 3-round cap). Never
+  treat a stale run from an earlier commit as this branch's green.
 
 ### Step 5 — Verify & advance
 
@@ -151,7 +158,10 @@ When all issues are done (or the stack stopped early), report:
    Subagents only.
 3. Sequential only — one issue, one subagent at a time (they share the
    worktree).
-4. Never start issue N+1 unless issue N verified AND its CI is green.
+4. Never start issue N+1 unless issue N verified AND its CI is green — the remote
+   run for issue N's HEAD, or a full local `nix run .#ci` pass when Graphite
+   skipped CI (6th+ in the stack). A stale run from an earlier commit is never
+   green.
 5. Keep main-loop context tiny: no source, no diffs, no full logs; `tail`
    only when diagnosing a failure.
 6. Pin the work subagents to `sonnet`; plan critics are exactly one Fable

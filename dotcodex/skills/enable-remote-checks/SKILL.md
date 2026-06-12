@@ -59,14 +59,21 @@ For the rest of the current task:
    Use `--stack` only when the user asks to submit the whole stack or stack
    policy in the repo requires it.
 
-6. Identify the commit and newest CI run:
+6. Identify the commit and its CI run:
    ```bash
    git rev-parse HEAD
-   gh run list --branch "$(git branch --show-current)" --limit 10
+   gh run list --branch "$(git branch --show-current)" --limit 10 \
+     --json databaseId,status,conclusion,headSha
    ```
-   Poll the run until it reaches a terminal state. A long-running poll may use a
-   persistent shell session; do not end the task while a required poll is still
-   active.
+   Poll the run **whose `headSha` matches the pushed HEAD** until it reaches a
+   terminal state — a stale run from a different commit is not this branch's
+   verification. A long-running poll may use a persistent shell session; do not
+   end the task while a required poll is still active.
+
+   If no run for this HEAD appears after ~90s, Graphite skipped CI for this branch
+   (it caps CI at the first 5 PRs in a stack). Fall back to the **full local CI
+   matrix** (`nix run .#ci`, or the repo's equivalent) as the gate, and report
+   that this branch was verified locally.
 
 7. On failure:
    - Use `ci-fix`.
@@ -82,7 +89,9 @@ For the rest of the current task:
 
 - Do not use raw `git commit`, `git push`, `git rebase`, or `git checkout -b`.
 - Do not run expensive full local CI after this workflow is enabled unless the
-  user explicitly asks.
-- Always follow the newest run for the current commit; older canceled runs are
-  not authoritative.
+  user explicitly asks, **or** Graphite skipped CI for this branch (6th+ in the
+  stack, no run for the pushed HEAD) — then the local matrix is the only gate.
+- Always follow the run whose `headSha` matches the pushed HEAD; older or
+  different-commit runs are not authoritative, and a missing one means fall back
+  to local CI, never accept a stale green.
 - Do not amend unrelated user changes into the branch.
