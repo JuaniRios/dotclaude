@@ -141,9 +141,20 @@ path and these instructions: read the plan file (including the critique
 notes) and the repo docs, implement the plan fully with the test coverage it
 specifies, and run scoped verification per the repo's conventions (e.g.
 `cargo check -p <crate>` + `cargo nextest run -p <crate>`), fixing what it
-finds. It returns: files touched, test results, and any deviations from the
-plan (with rationale). The subagent then closes — its research and diff
-context dies with it.
+finds. Tell it to **keep its own context lean** — edit files surgically, avoid
+re-reading whole files or the full diff repeatedly, and run scoped checks (not
+the full workspace suite each time) — so it doesn't exhaust its window on a
+multi-task plan. It returns a **tight** summary: one line per file touched,
+test results, and any deviations (with rationale) — not full diffs. The
+subagent then closes — its research and diff context dies with it.
+
+**If the implementer overflows its context** ("Prompt is too long") or dies
+mid-run on a large plan, do not panic and do not re-feed it everything. Its
+edits are already on disk — verify completion **independently from the main
+session** with `cargo check`/`cargo test` plus targeted `grep`s for the plan's
+key symbols/tests, and only spawn a fresh scoped subagent for whatever the
+checks show is missing. Splitting a big plan across two implementer subagents
+(by task group) up front avoids the overflow entirely.
 
 Fold the work into the branch (this also replaces the benign change from
 step 2):

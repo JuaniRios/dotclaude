@@ -465,9 +465,18 @@ applies to the WRAPPER agent that shells out to the codex CLI and parses
 its output — pin it to sonnet, or it inherits the (possibly premium)
 session model for trivial wrapper work.
 
-Each lane object: `{key, codex, model, promptPath, diffPath, effort?}`.
-`effort` (codex lanes only) defaults to `medium`. Normally all lanes share
-`$out_dir/diff.patch`; chunked runs differ (see below).
+**Pass lanes compactly.** Don't hand-spell the full lane objects in `args` —
+the script expands them. The caller sends just `outDir`, `diffPath`, and
+`laneKeys` (e.g. `["fable-a","fable-b","sonnet","codex-a","codex-b",
+"test-inspector","rust-inspector","typing-inspector","contract-inspector"]`);
+the script's `LANE_CATALOGUE` turns each key into the full
+`{key, codex, model, promptPath, diffPath, effort?}` (promptPath =
+`$out_dir/prompt-<key>.txt`, `effort` defaults to `medium` for codex lanes).
+This keeps the per-pass `args` the main session inlines tiny — re-spelling 9
+objects with absolute paths every pass just burns main-session tokens for zero
+review value. Normally all lanes share `$out_dir/diff.patch`. **Chunked runs**
+(per-chunk keys like `fable-a-chunk-b`, per-chunk paths) are the exception:
+pass an explicit `lanes` array, which the script uses verbatim.
 
 ### Adaptive panel sizing (by diff size)
 
@@ -513,20 +522,29 @@ nix develop .#ci-backend -c true >/dev/null 2>&1 &
 
 ### Workflow invocation
 
-Invoke the `Workflow` tool with the script below via `script`, and `args`:
+Invoke the `Workflow` tool with the script below via `script`, and `args`
+(compact form — the script expands `laneKeys` into full lane objects):
 
 ```json
 {
   "repoRoot": "<repo_root>",
   "contextPath": "<out_dir>/context.txt",
-  "lanes": [ ...lane objects... ],
+  "outDir": "<out_dir>",
+  "diffPath": "<out_dir>/diff.patch",
+  "laneKeys": [ "fable-a", "fable-b", "sonnet", ... ],
   "fixedFindings": []
 }
 ```
 
-`fixedFindings` is `[]` on the first pass. The tool result includes a
-`scriptPath` — reuse it (`{scriptPath, args}`) for every re-review pass
-instead of resending the script.
+`fixedFindings` is `[]` on the first pass. On re-review passes pass it as
+**locator-only** objects `{title, file, line_start, line_end}` — the verify-fix
+agent reads the actual source at that location, so inlining the full
+`finding`/`why_it_matters`/`recommended_fix` prose just wastes main-session
+tokens. The tool result includes a `scriptPath` — reuse it
+(`{scriptPath, args}`) for every re-review pass instead of resending the
+script. Build the `args` with a small Bash/python step and pass it straight to
+the tool — do **not** `Read` the generated args JSON back into the main context
+(it lives on disk for the tool).
 
 ```javascript
 export const meta = {
@@ -594,7 +612,32 @@ const parsedArgs = typeof args === 'string' ? JSON.parse(args) : args
 // fixes on re-review passes. Re-review is a genuine INDEPENDENT panel pass
 // over the full updated diff (stochastic coverage — each pass surfaces
 // different findings), with fix-verification folded in concurrently.
-const { repoRoot, contextPath, lanes, fixedFindings = [] } = parsedArgs
+const { repoRoot, contextPath, outDir, diffPath, laneKeys,
+  lanes: explicitLanes, fixedFindings = [] } = parsedArgs
+
+// Lane catalogue: the caller passes a COMPACT { outDir, diffPath, laneKeys }
+// and the script expands each key to a full lane object here — so the per-pass
+// args the main session must inline stay tiny (the lanes are identical every
+// pass except diffPath, so re-spelling 9 objects with absolute paths each pass
+// just burns main-session tokens). Chunked runs (lane keys like
+// `fable-a-chunk-b`, per-chunk promptPath/diffPath) pass an explicit `lanes`
+// array instead, which takes precedence.
+const LANE_CATALOGUE = {
+  'fable-a':            { codex: false, model: 'sonnet' },
+  'fable-b':            { codex: false, model: 'fable'  },
+  'sonnet':             { codex: false, model: 'sonnet' },
+  'codex-a':            { codex: true,  model: 'sonnet', effort: 'medium' },
+  'codex-b':            { codex: true,  model: 'sonnet', effort: 'medium' },
+  'test-inspector':     { codex: false, model: 'sonnet' },
+  'rust-inspector':     { codex: false, model: 'sonnet' },
+  'typing-inspector':   { codex: false, model: 'sonnet' },
+  'contract-inspector': { codex: false, model: 'fable'  },
+}
+const lanes = explicitLanes || (laneKeys || []).map(key => ({
+  key, ...LANE_CATALOGUE[key],
+  promptPath: `${outDir}/prompt-${key}.txt`,
+  diffPath,
+}))
 
 // Each lane reviews the FULL diff, then its own findings are adversarially
 // verified immediately — pipeline, NOT a barrier waiting on the slowest
@@ -824,6 +867,14 @@ Full report: <absolute path to review.md>
 Keep each finding to **two lines**: title line (title + lanes + confidence)
 and fix line (recommended fix). The full details live in `review.md`.
 
+**Never echo full finding bodies into the main session.** Parse
+`findings.json` to this compact summary (and the step-9 triage table) only —
+do not print or `cat` the `finding`/`why_it_matters`/`recommended_fix` prose,
+and do not pretty-print the whole JSON to the terminal. Triage decisions are
+made from `{severity, verdict, confidence, file, line, title}`; the prose stays
+on disk in `review.md`/`findings.json`. Re-dumping all N findings' bodies each
+pass is the single biggest avoidable main-context cost of the loop.
+
 If the review reports **no findings**, print that prominently and exit —
 nothing to loop over.
 
@@ -1006,12 +1057,13 @@ git diff "$parent" > "$out_dir/diff-iter${N}.patch"   # updated full diff
 git diff HEAD --stat | tail -1                          # what the loop changed
 ```
 
-Update the lanes' `diffPath` to `diff-iter${N}.patch`, rewrite the shared
-`context.txt` to point at it, and re-pick the lane set with the **step 5
-adaptive sizing** rule against the updated diff. On chunked runs, also apply
-the **changed-chunks-only** rule from step 5: regenerate the per-chunk
-patches, full panel only for chunks whose patch differs from the previous
-iteration, codex lanes only for unchanged chunks.
+Bump `diffPath` to `diff-iter${N}.patch` in the `args` (a single field — the
+script rebuilds the lanes from it), rewrite the shared `context.txt` to point
+at it, and re-pick `laneKeys` with the **step 5 adaptive sizing** rule against
+the updated diff. On chunked runs, also apply the **changed-chunks-only** rule
+from step 5: regenerate the per-chunk patches, full panel only for chunks whose
+patch differs from the previous iteration, codex lanes only for unchanged
+chunks (chunked runs pass an explicit `lanes` array).
 
 ### Formatter-only skip (R3)
 
@@ -1033,8 +1085,10 @@ step 5) with the updated lanes and this loop's fixes:
 {
   "repoRoot": "<repo_root>",
   "contextPath": "<out_dir>/context.txt",
-  "lanes": [ ...adaptively-sized lanes, diffPath = diff-iter${N}.patch... ],
-  "fixedFindings": [ ...every finding fixed THIS loop... ]
+  "outDir": "<out_dir>",
+  "diffPath": "<out_dir>/diff-iter${N}.patch",
+  "laneKeys": [ ...adaptively-sized lane keys... ],
+  "fixedFindings": [ ...{title, file, line_start, line_end} per fix THIS loop... ]
 }
 ```
 
@@ -1311,3 +1365,11 @@ per-branch summary line, then continue the upstack walk — do not stop here.
     delegate prompt building, report assembly, and fix application to
     closing `sonnet` subagents (steps 4, 5, 11); the Workflow invocations,
     triage, and user checkpoints always stay in the main session.
+18. **Keep large generated artifacts out of the main context.** Pass lanes
+    compactly (`laneKeys`, not 9 spelled-out objects) and `fixedFindings` as
+    locator-only objects; build the Workflow `args` with a Bash/python step and
+    pass it straight to the tool. Never `Read` the generated args JSON or the
+    diff patches back into the main session, and never pretty-print full
+    finding bodies — those live on disk for the workflow/`review.md`. This is
+    quality-neutral (same lanes, same verification) and is the loop's biggest
+    main-context saving.
