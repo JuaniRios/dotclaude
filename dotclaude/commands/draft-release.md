@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(gh:*), Bash(git:*), Bash(mkdir:*), Bash(test:*), Bash(date:*), Bash(wc:*), Bash(sort:*), Bash(grep:*), Bash(sed:*), Read, Write
-description: Draft release notes by diffing the last GitHub release against master — a non-technical summary on top, then a technical PR-by-PR breakdown. Resolves PRs via commit trailers so graphite-merged (closed-not-merged) PRs are still captured.
+description: Draft release notes by diffing the last GitHub release against master — a non-technical summary on top, a list of every PR and author, then a technical PR-by-PR breakdown. Resolves PRs via commit trailers so graphite-merged (closed-not-merged) PRs are still captured.
 argument-hint: (no args — baseline is the latest GitHub release)
 ---
 
@@ -99,6 +99,18 @@ alone.>
 
 <Optional: 1-2 lines on the single most important change, if there is one.>
 
+## Pull requests
+
+<A flat list of every PR in this release with its author — one line each, in
+merge order. Built from the resolved commit -> PR mapping in step 3, NOT from
+GitHub's merge-state, so graphite-merged PRs (shown as closed-not-merged on
+GitHub) still appear here. Commits with no associated PR are listed by short
+SHA.>
+
+- **#NNN** <PR title> — _@author_
+- **#NNN** <PR title> — _@author_
+- **<short-sha>** <subject> (no associated PR)
+
 ## Technical changelog
 
 Grouped by theme. One line per PR:
@@ -142,8 +154,11 @@ This command only drafts notes for human review.
    its PR if it has one, under "direct commits" if not.
 3. Read every PR body you resolve; don't summarize from the title alone when the
    body has context.
-4. Two-layer output is mandatory: non-technical summary first, technical
-   breakdown second.
+4. Three-layer output is mandatory: non-technical summary first, a flat
+   "Pull requests" list of every PR and author second, technical breakdown
+   third. The PR list is sourced from the resolved commit -> PR mapping, never
+   from GitHub's merge-state — graphite-merged PRs read as closed-not-merged
+   and must still be listed.
 5. Write to `.tmp/` only — never to a tracked path, and never create a GitHub
    release.
 
