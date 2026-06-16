@@ -205,7 +205,7 @@ setup sequences, concurrent writers to shared state, and assumptions about
 which operation completes first.
 ```
 
-**Sonnet B — Goal evaluation & domain logic:**
+**Opus B — Goal evaluation & domain logic:**
 ```
 YOUR FOCUS: Read the PR description carefully, then evaluate whether the
 implementation actually achieves what it claims. If the PR says "events
@@ -307,22 +307,24 @@ no output-file validation, no separate aggregator agent.
 Build the lane list (drop the codex lanes if `codex` is not on PATH — check
 `command -v codex`; warn the user and continue with 7 lanes):
 
-| key                | codex | model  | promptPath                              |
-| ------------------ | ----- | ------ | --------------------------------------- |
-| sonnet-a           | no    | sonnet | prompt-sonnet-a.txt (concurrency)       |
-| sonnet-b           | no    | sonnet | prompt-sonnet-b.txt (goal evaluation)   |
-| sonnet             | no    | sonnet | prompt-sonnet.txt (error handling)      |
-| codex-a            | yes   | sonnet | prompt-codex-a.txt (edge cases)         |
-| codex-b            | yes   | sonnet | prompt-codex-b.txt (broad sweep)        |
-| test-inspector     | no    | sonnet | prompt-test-inspector.txt               |
-| rust-inspector     | no    | sonnet | prompt-rust-inspector.txt               |
-| typing-inspector   | no    | sonnet | prompt-typing-inspector.txt             |
-| contract-inspector | no    | sonnet | prompt-contract-inspector.txt           |
+| key                | codex | model  | effort | promptPath                              |
+| ------------------ | ----- | ------ | ------ | --------------------------------------- |
+| sonnet-a           | no    | sonnet |        | prompt-sonnet-a.txt (concurrency)       |
+| opus-b             | no    | opus   | xhigh  | prompt-opus-b.txt (goal evaluation)     |
+| sonnet             | no    | sonnet |        | prompt-sonnet.txt (error handling)      |
+| codex-a            | yes   | sonnet | medium | prompt-codex-a.txt (edge cases)         |
+| codex-b            | yes   | sonnet | medium | prompt-codex-b.txt (broad sweep)        |
+| test-inspector     | no    | sonnet |        | prompt-test-inspector.txt               |
+| rust-inspector     | no    | sonnet |        | prompt-rust-inspector.txt               |
+| typing-inspector   | no    | sonnet |        | prompt-typing-inspector.txt             |
+| contract-inspector | no    | opus   | xhigh  | prompt-contract-inspector.txt           |
 
-**Model allocation:** All non-Codex lanes run on Sonnet. The codex lanes'
-model applies to the WRAPPER agent that shells out to the codex CLI and
-parses its output — pin it to sonnet, or it inherits the (possibly premium)
-session model for trivial wrapper work.
+**Model allocation:** `opus-b` (goal evaluation) and `contract-inspector`
+run on Opus at xhigh effort — the lanes where deep reasoning demonstrably
+finds unique high-severity issues. All other non-Codex lanes run on Sonnet.
+The codex lanes' model applies to the WRAPPER agent that shells out to the
+codex CLI — pin it to sonnet, or it inherits the session model for trivial
+wrapper work.
 
 Each lane object: `{key, codex, model, promptPath, diffPath}`. All lanes
 share `$out_dir/diff.patch`.
@@ -424,6 +426,7 @@ const laneResults = await parallel(lanes.map(lane => () => {
     label: `review:${lane.key}`,
     phase: 'Review',
     model: lane.model,
+    ...(lane.effort && !lane.codex ? { effort: lane.effort } : {}),
     schema: REVIEW_SCHEMA,
   }).then(result => result && ({
     key: lane.key,
@@ -523,7 +526,7 @@ const synthesis = await agent(
   `out-of-scope", "## Overall assessment" (2-3 paragraphs of your own ` +
   `senior-engineer judgment). No emojis, no apologies, be decisive.` +
   (synthesisExtra ? `\n\n${synthesisExtra}` : ''),
-  { label: 'synthesize', phase: 'Synthesize', model: 'sonnet',
+  { label: 'synthesize', phase: 'Synthesize', model: 'opus', effort: 'xhigh',
     schema: {
       type: 'object',
       required: ['report_markdown'],

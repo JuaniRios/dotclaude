@@ -307,7 +307,7 @@ setup sequences, concurrent writers to shared state, and assumptions about
 which operation completes first.
 ```
 
-**Sonnet B — Goal evaluation & domain logic:**
+**Opus B — Goal evaluation & domain logic:**
 ```
 YOUR FOCUS: Read the PR description carefully, then evaluate whether the
 implementation actually achieves what it claims. If the PR says "events
@@ -439,26 +439,29 @@ and the lane set (which may shrink for small diffs, below).
 
 Full lane catalogue (drop the codex lanes if `codex` is not on PATH):
 
-| key                | codex | model  | promptPath                              |
-| ------------------ | ----- | ------ | --------------------------------------- |
-| sonnet-a           | no    | sonnet | prompt-sonnet-a.txt (concurrency)       |
-| sonnet-b           | no    | sonnet | prompt-sonnet-b.txt (goal evaluation)   |
-| sonnet             | no    | sonnet | prompt-sonnet.txt (error handling)      |
-| codex-a            | yes   | sonnet | prompt-codex-a.txt (edge cases)         |
-| codex-b            | yes   | sonnet | prompt-codex-b.txt (broad sweep)        |
-| test-inspector     | no    | sonnet | prompt-test-inspector.txt               |
-| rust-inspector     | no    | sonnet | prompt-rust-inspector.txt               |
-| typing-inspector   | no    | sonnet | prompt-typing-inspector.txt             |
-| contract-inspector | no    | sonnet | prompt-contract-inspector.txt           |
+| key                | codex | model  | effort | promptPath                              |
+| ------------------ | ----- | ------ | ------ | --------------------------------------- |
+| sonnet-a           | no    | sonnet |        | prompt-sonnet-a.txt (concurrency)       |
+| opus-b             | no    | opus   | xhigh  | prompt-opus-b.txt (goal evaluation)     |
+| sonnet             | no    | sonnet |        | prompt-sonnet.txt (error handling)      |
+| codex-a            | yes   | sonnet | medium | prompt-codex-a.txt (edge cases)         |
+| codex-b            | yes   | sonnet | medium | prompt-codex-b.txt (broad sweep)        |
+| test-inspector     | no    | sonnet |        | prompt-test-inspector.txt               |
+| rust-inspector     | no    | sonnet |        | prompt-rust-inspector.txt               |
+| typing-inspector   | no    | sonnet |        | prompt-typing-inspector.txt             |
+| contract-inspector | no    | opus   | xhigh  | prompt-contract-inspector.txt           |
 
-**Model allocation:** All non-Codex lanes run on Sonnet. The codex lanes'
-model applies to the WRAPPER agent that shells out to the codex CLI and
-parses its output — pin it to sonnet, or it inherits the (possibly premium)
-session model for trivial wrapper work.
+**Model allocation:** `opus-b` (goal evaluation) and `contract-inspector`
+run on Opus at xhigh effort — the lanes where deep reasoning demonstrably
+finds unique high-severity issues (intent-vs-implementation gaps, unpinned
+external assumptions at money boundaries). All other non-Codex lanes run
+on Sonnet. The codex lanes' model applies to the WRAPPER agent that shells
+out to the codex CLI — pin it to sonnet, or it inherits the (possibly
+premium) session model for trivial wrapper work.
 
 **Pass lanes compactly.** Don't hand-spell the full lane objects in `args` —
 the script expands them. The caller sends just `outDir`, `diffPath`, and
-`laneKeys` (e.g. `["sonnet-a","sonnet-b","sonnet","codex-a","codex-b",
+`laneKeys` (e.g. `["sonnet-a","opus-b","sonnet","codex-a","codex-b",
 "test-inspector","rust-inspector","typing-inspector","contract-inspector"]`);
 the script's `LANE_CATALOGUE` turns each key into the full
 `{key, codex, model, promptPath, diffPath, effort?}` (promptPath =
@@ -476,7 +479,7 @@ coverage, not just fix-checking — see step 12), so size the panel to the
 diff to keep each pass affordable. Inspectors are always included (9–18s
 each, negligible):
 
-- **< 50 changed lines:** `sonnet-b` (goal eval) + one codex broad lane +
+- **< 50 changed lines:** `opus-b` (goal eval) + one codex broad lane +
   all four inspectors. ~5 lanes.
 - **50–500 lines:** the full catalogue minus one codex lane (`codex-a` and
   `codex-b` overlap heavily). ~8 lanes.
@@ -522,7 +525,7 @@ Invoke the `Workflow` tool with the script below via `script`, and `args`
   "contextPath": "<out_dir>/context.txt",
   "outDir": "<out_dir>",
   "diffPath": "<out_dir>/diff.patch",
-  "laneKeys": [ "sonnet-a", "sonnet-b", "sonnet", ... ],
+  "laneKeys": [ "sonnet-a", "opus-b", "sonnet", ... ],
   "fixedFindings": []
 }
 ```
@@ -615,14 +618,14 @@ const { repoRoot, contextPath, outDir, diffPath, laneKeys,
 // array instead, which takes precedence.
 const LANE_CATALOGUE = {
   'sonnet-a':           { codex: false, model: 'sonnet' },
-  'sonnet-b':           { codex: false, model: 'sonnet' },
+  'opus-b':             { codex: false, model: 'opus',   effort: 'xhigh' },
   'sonnet':             { codex: false, model: 'sonnet' },
   'codex-a':            { codex: true,  model: 'sonnet', effort: 'medium' },
   'codex-b':            { codex: true,  model: 'sonnet', effort: 'medium' },
   'test-inspector':     { codex: false, model: 'sonnet' },
   'rust-inspector':     { codex: false, model: 'sonnet' },
   'typing-inspector':   { codex: false, model: 'sonnet' },
-  'contract-inspector': { codex: false, model: 'sonnet' },
+  'contract-inspector': { codex: false, model: 'opus',   effort: 'xhigh' },
 }
 const lanes = explicitLanes || (laneKeys || []).map(key => ({
   key, ...LANE_CATALOGUE[key],
@@ -662,6 +665,7 @@ const reviewLane = (lane) => {
       `diff, the project docs, and any source files referenced by the diff.`
   return agent(prompt, {
     label: `review:${lane.key}`, phase: 'Review', model: lane.model,
+    ...(lane.effort && !lane.codex ? { effort: lane.effort } : {}),
     schema: REVIEW_SCHEMA,
   }).then(result => ({
     key: lane.key,
