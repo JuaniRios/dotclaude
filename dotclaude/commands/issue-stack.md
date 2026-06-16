@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(git:*), Bash(gt:*), Bash(gh:*), Bash(linear:*), Bash(codex:*), Bash(cargo:*), Bash(nix:*), Bash(mkdir:*), Bash(cat:*), Bash(tail:*), Bash(test:*), Bash(mktemp:*), Bash(rm:*), Bash(sleep:*), Bash(grep:*), Bash(wc:*), Bash(date:*), Bash(find:*), Bash(basename:*), Read, Write, Agent, Skill, Workflow, AskUserQuestion, TodoWrite
-description: Cheap-model babysitter that implements a whole stack of Linear issues. Runs on Sonnet; for each issue in order it mirrors /implement-issue autonomously via closing subagents — one Sonnet subagent plans (Codex + Fable critique the plan) and implements; the main loop then runs /review-loop (its Workflow panel exists only in the main session) with all heavy steps delegated to subagents, runs /pr-description, amends + gt ss + waits for CI, then starts the next issue from scratch stacked on top. Never spawns headless `claude -p` sessions (they bill as extra usage); subagents stay inside the subscription session.
+description: Opus-medium babysitter that implements a whole stack of Linear issues. Runs on Opus (medium effort) for orchestration fidelity — its context stays tiny by design so the premium model is cheap here; for each issue in order it mirrors /implement-issue autonomously via closing subagents — a Sonnet subagent plans (Codex + Fable critique the plan), then a separate Sonnet subagent implements off the plan file; the main loop then runs /review-loop (its Workflow panel exists only in the main session) with all heavy steps delegated to subagents, runs /pr-description, amends + gt ss + waits for CI, then starts the next issue from scratch stacked on top. Never spawns headless `claude -p` sessions (they bill as extra usage); subagents stay inside the subscription session.
 argument-hint: <issue-1> <issue-2> [issue-3 ...]
 ---
 
@@ -26,8 +26,13 @@ the source of truth for the per-issue steps). The autonomous overrides:
 - **No user questions after pre-flight.** The Codex + Fable plan critique
   replaces the user's plan approval; `/review-loop` decides every finding
   itself; `/pr-description`'s Codex gate replaces description confirmation.
-- **Plan and implement are ONE subagent** (no human gate between them), so
-  plan context flows straight into implementation.
+- **Plan and implement are two sequential subagents, no human gate between
+  them.** The planner closes after writing the plan file; the babysitter
+  immediately spawns the implementer, which reads that plan file — so plan
+  context flows through `.tmp/issue-stack/<ISSUE-ID>-plan.md`, not through one
+  giant shared window. Keeping them in *one* subagent (research + plan +
+  critique + full implementation) overflows its context on a non-trivial
+  issue; the split fixes that without reintroducing a user gate.
 - Every decision a user checkpoint would have caught goes into the per-issue
   log `.tmp/issue-stack/<ISSUE-ID>.md` for the morning review.
 
@@ -35,8 +40,13 @@ Track per-issue progress with `TodoWrite`.
 
 ## Step 0 — Pre-flight (the only interactive moment)
 
-1. **Model check.** You should be a cheap model. If your system prompt says
-   you are Fable, tell the user to switch with `/model sonnet` and stop.
+1. **Model check.** Run the babysitter on **Opus with medium effort** — it
+   drives a long, intricate flow (5 steps x N issues, headSha matching, stack
+   verification, subagent-failure recovery) where orchestration fidelity
+   matters, and its context stays tiny by design so the premium model is cheap
+   here. If your session is not Opus, tell the user to switch with `/model`
+   (Opus, medium effort) and stop. (Do not run the babysitter on Fable — that
+   is the review-lane model, not an orchestrator.)
 2. **Repo state.** Verify cwd is the intended repo/worktree and the tree is
    clean (`git status --porcelain` empty). Run `gt sync` once now (never
    mid-stack); note the current branch — the stack grows from `gt top` of it.
@@ -62,11 +72,17 @@ hyperlink, What/How literally `WIP`; `gh pr edit --body-file`), the
 `findolor`. Do not invoke `/pr-description` for the skeleton — a hand-written
 WIP body is enough here and cheaper.
 
-### Step 2 — Plan & implement subagent
+### Step 2 — Plan, then implement (two sequential subagents)
 
-Spawn **one subagent** (`Agent`, `model: sonnet`) with the issue ID, title,
-description, URL, and branch name, instructed to follow `/implement-issue`
-steps 5–6 end-to-end with no approval gate:
+These are **two** subagents with no human gate between them. Splitting them
+keeps each window small — one merged plan-and-implement subagent overflows its
+context ("Prompt is too long") on a non-trivial issue, since it has to hold
+research + plan + critique + the full implementation at once. The plan flows
+between them through the plan file, not a shared window.
+
+**Step 2a — Planner subagent** (`Agent`, `model: sonnet`) with the issue ID,
+title, description, and URL, following `/implement-issue` step 5 with no
+approval gate:
 
 1. Research repo docs + source; write the ordered plan to
    `.tmp/issue-stack/<ISSUE-ID>-plan.md`.
@@ -76,11 +92,27 @@ steps 5–6 end-to-end with no approval gate:
    `## Critique` section (adopted/rejected, one-line rationale each). If the
    Agent tool is unavailable in its context, run only the Codex critique and
    flag it.
-3. The plan is auto-approved — implement it fully with tests, run scoped
-   checks (`cargo check -p` / `cargo nextest run -p` or repo equivalent),
-   fix what they find.
-4. Append every notable decision to `.tmp/issue-stack/<ISSUE-ID>.md`, return
-   a short summary (files touched, test results, deviations), and close.
+3. Return a short summary and the plan path, then close. The plan is
+   auto-approved (no user gate) — proceed straight to 2b.
+
+**Step 2b — Implementer subagent** (`Agent`, `model: sonnet`) with the plan
+path and branch name, following `/implement-issue` step 6:
+
+1. Read the plan file (including its `## Critique` notes) and the repo docs;
+   implement it fully with the tests it specifies, editing files surgically
+   and running **scoped** checks (`cargo check -p` / `cargo nextest run -p` or
+   repo equivalent) — never the full workspace suite each iteration — to keep
+   its own window lean.
+2. Append every notable decision to `.tmp/issue-stack/<ISSUE-ID>.md`, return a
+   **tight** summary (one line per file touched, test results, deviations with
+   rationale — not full diffs), and close.
+
+**If 2b overflows or dies mid-run** (`/implement-issue` step 6 covers this):
+its edits are already on disk — do not re-feed everything. Independently
+verify completion with scoped `cargo check`/`cargo nextest run` plus targeted
+`grep`s for the plan's key symbols/tests, and spawn a fresh scoped implementer
+only for whatever the checks show is still missing. For a large plan, split 2b
+by task group across two implementer subagents up front to avoid the overflow.
 
 Main loop afterwards: `gt modify -a`.
 
@@ -164,8 +196,11 @@ When all issues are done (or the stack stopped early), report:
    green.
 5. Keep main-loop context tiny: no source, no diffs, no full logs; `tail`
    only when diagnosing a failure.
-6. Pin the work subagents to `sonnet`; plan critics are exactly one Fable
-   subagent + one Codex CLI pass (mirrors `/implement-issue` hard rule 5).
+6. Pin the work subagents (planner 2a, implementer 2b, fixers) to `sonnet`;
+   plan and implement are **separate** subagents (Step 2), never merged, so
+   neither overflows. Plan critics are exactly one Fable subagent + one Codex
+   CLI pass (mirrors `/implement-issue` hard rule 5). The babysitter itself
+   runs on Opus medium (Step 0.1).
 7. All version-control mutations via `gt` (graphite skill). `gt sync` only
    in pre-flight, never mid-stack.
 8. Every skipped user checkpoint becomes a logged decision in
