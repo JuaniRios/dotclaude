@@ -1,6 +1,6 @@
 ---
 allowed-tools: Bash(git:*), Bash(gt:*), Bash(gh:*), Bash(linear:*), Bash(codex:*), Bash(cargo:*), Bash(nix:*), Bash(mkdir:*), Bash(cat:*), Bash(tail:*), Bash(test:*), Bash(mktemp:*), Bash(rm:*), Bash(sleep:*), Bash(grep:*), Bash(wc:*), Bash(date:*), Bash(find:*), Bash(basename:*), Read, Write, Agent, Skill, Workflow, AskUserQuestion, TodoWrite
-description: Opus-medium babysitter that implements a whole stack of Linear issues. Runs on Opus (medium effort) for orchestration fidelity — its context stays tiny by design so the premium model is cheap here; for each issue in order it mirrors /implement-issue autonomously via closing subagents — a Sonnet subagent plans (Codex + Fable critique the plan), then a separate Sonnet subagent implements off the plan file; the main loop then runs /review-loop (its Workflow panel exists only in the main session) with all heavy steps delegated to subagents, runs /pr-description, amends + gt ss + waits for CI, then starts the next issue from scratch stacked on top. Never spawns headless `claude -p` sessions (they bill as extra usage); subagents stay inside the subscription session.
+description: Opus-medium babysitter that implements a whole stack of Linear issues. Runs on Opus (medium effort) for orchestration fidelity — its context stays tiny by design so the premium model is cheap here; for each issue in order it mirrors /implement-issue autonomously via closing subagents — a Sonnet subagent plans (Codex + Opus critique the plan), then a separate Sonnet subagent implements off the plan file; the main loop then runs /review-loop (its Workflow panel exists only in the main session) with all heavy steps delegated to subagents, runs /pr-description, amends + gt ss + waits for CI, then starts the next issue from scratch stacked on top. Never spawns headless `claude -p` sessions (they bill as extra usage); subagents stay inside the subscription session.
 argument-hint: <issue-1> <issue-2> [issue-3 ...]
 ---
 
@@ -23,7 +23,7 @@ This command mirrors `/implement-issue`
 (`~/.claude/commands/implement-issue.md` — read it once at the start; it is
 the source of truth for the per-issue steps). The autonomous overrides:
 
-- **No user questions after pre-flight.** The Codex + Fable plan critique
+- **No user questions after pre-flight.** The Codex + Opus plan critique
   replaces the user's plan approval; `/review-loop` decides every finding
   itself; `/pr-description`'s Codex gate replaces description confirmation.
 - **Plan and implement are two sequential subagents, no human gate between
@@ -45,8 +45,7 @@ Track per-issue progress with `TodoWrite`.
    verification, subagent-failure recovery) where orchestration fidelity
    matters, and its context stays tiny by design so the premium model is cheap
    here. If your session is not Opus, tell the user to switch with `/model`
-   (Opus, medium effort) and stop. (Do not run the babysitter on Fable — that
-   is the review-lane model, not an orchestrator.)
+   (Opus, medium effort) and stop.
 2. **Repo state.** Verify cwd is the intended repo/worktree and the tree is
    clean (`git status --porcelain` empty). Run `gt sync` once now (never
    mid-stack); note the current branch — the stack grows from `gt top` of it.
@@ -86,7 +85,8 @@ approval gate:
 
 1. Research repo docs + source; write the ordered plan to
    `.tmp/issue-stack/<ISSUE-ID>-plan.md`.
-2. Critique panel, in parallel: a **Fable subagent** (`model: fable`) and a
+2. Critique panel, in parallel: an **Opus subagent** (`model: opus`, xhigh
+   effort) and a
    **Codex CLI pass** (`codex exec --sandbox read-only -m gpt-5.5 -C
    "$repo_root" ...`) review the plan; incorporate feedback and append a
    `## Critique` section (adopted/rejected, one-line rationale each). If the
@@ -198,8 +198,9 @@ When all issues are done (or the stack stopped early), report:
    only when diagnosing a failure.
 6. Pin the work subagents (planner 2a, implementer 2b, fixers) to `sonnet`;
    plan and implement are **separate** subagents (Step 2), never merged, so
-   neither overflows. Plan critics are exactly one Fable subagent + one Codex
-   CLI pass (mirrors `/implement-issue` hard rule 5). The babysitter itself
+   neither overflows. Plan critics are exactly one Opus subagent (`model:
+   opus`, xhigh effort) + one Codex CLI pass (mirrors `/implement-issue` hard
+   rule 5). The babysitter itself
    runs on Opus medium (Step 0.1).
 7. All version-control mutations via `gt` (graphite skill). `gt sync` only
    in pre-flight, never mid-stack.

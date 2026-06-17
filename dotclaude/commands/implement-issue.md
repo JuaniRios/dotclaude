@@ -1,12 +1,12 @@
 ---
 allowed-tools: Bash(gt:*), Bash(git:*), Bash(gh:*), Bash(linear:*), Bash(codex:*), Bash(cargo:*), Bash(nix:*), Bash(mkdir:*), Bash(mktemp:*), Bash(cat:*), Bash(rm:*), Bash(test:*), Bash(basename:*), Bash(date:*), Bash(sleep:*), Bash(sed:*), Bash(grep:*), Bash(wc:*), Bash(find:*), Read, Write, Edit, Skill, Agent, Workflow, AskUserQuestion, TodoWrite
-description: Take a Linear issue from link to finished implementation — open a skeleton Graphite PR, cross-link Linear↔PR, plan via a Sonnet subagent critiqued by Codex + Fable, implement via closing subagents, review via /review-loop in the main session (its Workflow panel only exists there; heavy steps delegated internally), submit the stack, and get CI green.
+description: Take a Linear issue from link to finished implementation — open a skeleton Graphite PR, cross-link Linear↔PR, plan via a Sonnet subagent critiqued by Codex + Opus, implement via closing subagents, review via /review-loop in the main session (its Workflow panel only exists there; heavy steps delegated internally), submit the stack, and get CI green.
 argument-hint: <issue-link-or-number>
 ---
 
 Drive a Linear issue end-to-end: read it, open a skeleton PR on top of the
 stack, cross-link Linear and the PR, plan it via a subagent (critiqued by
-Codex + Fable, approved by the user), implement via a subagent, self-review
+Codex + Opus, approved by the user), implement via a subagent, self-review
 via `/review-loop` in the main session (its heavy steps delegated to
 subagents), submit the stack, and get CI green.
 
@@ -98,7 +98,7 @@ final description) so the flow isn't blocked, then let `pr-description` push it.
 
 Confirm both directions are linked before continuing.
 
-## 5. Plan via a planner subagent (Codex + Fable critique)
+## 5. Plan via a planner subagent (Codex + Opus critique)
 
 Planning happens in a subagent that researches, drafts, gets critiqued, and
 closes — only the refined plan returns to the main session.
@@ -115,15 +115,15 @@ title, description, and URL, plus these instructions:
    implementation plan (spec-first, tests per task) into
    `.tmp/implement-issue/<issue-id>-plan.md`.
 2. Get two **independent plan critiques in parallel**:
-   - A **Fable subagent** (`Agent`, `model: fable`): adversarial critique —
-     simpler designs, conflicts with `SPEC.md`/repo conventions, missing test
-     coverage, hidden coupling, steps that will not survive contact with the
-     code.
+   - An **Opus subagent** (`Agent`, `model: opus`, xhigh effort): adversarial
+     critique — simpler designs, conflicts with `SPEC.md`/repo conventions,
+     missing test coverage, hidden coupling, steps that will not survive
+     contact with the code.
    - A **Codex pass** (`Bash`): pipe the plan to
      `codex exec --sandbox read-only -m gpt-5.5 -C "$repo_root" "<critique
      prompt: same focus, plus 'what would a staff engineer push back on?'>"`.
    If the Agent tool is unavailable in the subagent's context, run only the
-   Codex critique and flag the missing Fable pass in the report.
+   Codex critique and flag the missing Opus pass in the report.
 3. Incorporate the feedback into the plan file and append a `## Critique`
    section noting which points were adopted and which rejected (with one-line
    rationale each).
@@ -241,7 +241,8 @@ Tell the user implementation is finished. Print:
    and `/pr-description` run in the main session (the `Workflow` tool is
    unavailable inside subagents) but delegate their heavy lifting internally.
    Pin the planner/implementer/fixer subagents to `sonnet`; the plan critics
-   are exactly one Fable subagent + one Codex CLI pass.
+   are exactly one Opus subagent (`model: opus`, xhigh effort) + one Codex CLI
+   pass.
 6. The skeleton description (step 3) may be auto-approved since it's an
    explicit WIP placeholder; the final description is gated by
    `/pr-description`'s Codex review pass and pushed automatically — show the
